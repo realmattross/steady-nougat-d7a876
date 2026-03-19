@@ -1,5 +1,3 @@
-// @netlify/blobs loaded dynamically
-
 export default async (req, context) => {
   if (req.method !== "POST") return new Response("OK");
   const tok = Netlify.env.get("TELEGRAM_BOT_TOKEN");
@@ -26,6 +24,7 @@ export default async (req, context) => {
   if (!txt) return new Response("OK");
   if (txt === "/start") { await send(cid, "Jarvis online."); return new Response("OK"); }
 
+  // Google token
   const getGToken = async () => {
     if (!gcid||!gcs||!grt) return null;
     try {
@@ -37,6 +36,7 @@ export default async (req, context) => {
     } catch(e) { return null; }
   };
 
+  // Calendar
   const getCalendar = async (gt, hours=24) => {
     if (!gt) return "Calendar unavailable";
     const now = new Date(), end = new Date(now.getTime()+hours*3600000);
@@ -59,6 +59,7 @@ export default async (req, context) => {
     return d.id?`Added: ${title}`:`Failed: ${d.error?.message||"unknown"}`;
   };
 
+  // Gmail
   const getEmails = async (gt) => {
     if (!gt) return "Gmail unavailable";
     const r=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent("in:inbox -category:promotions -category:social -from:noreply -from:no-reply")}&maxResults=6`,{headers:{Authorization:"Bearer "+gt}});
@@ -84,6 +85,7 @@ export default async (req, context) => {
     } catch(e){return `Error: ${e.message}`;}
   };
 
+  // Drive
   const searchDrive = async (gt,query) => {
     if (!gt) return "Drive unavailable";
     const r=await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(`fullText contains '${query}' and trashed=false`)}&fields=files(id,name,webViewLink)&pageSize=5&orderBy=modifiedTime desc`,{headers:{Authorization:"Bearer "+gt}});
@@ -92,6 +94,7 @@ export default async (req, context) => {
     return d.files.map(f=>`${f.name}\n${f.webViewLink}`).join("\n\n");
   };
 
+  // Google Docs
   const createDoc = async (gt,title,content) => {
     if (!gt) return {error:"No token"};
     try {
@@ -103,6 +106,7 @@ export default async (req, context) => {
     } catch(e){return {error:e.message};}
   };
 
+  // Memory via Netlify Blobs
   const { getStore } = await import("@netlify/blobs");
   const store = getStore("jarvis");
   const loadMem = async () => {try{return(await store.get("memory",{type:"json"}))||{items:[]};}catch(e){return{items:[]};}};
@@ -113,9 +117,10 @@ export default async (req, context) => {
   const saveHist = async (t) => {try{await store.setJSON("hist-"+cid,{t:t.slice(-10)});}catch(e){}};
 
   const lower = txt.toLowerCase().trim();
-  const YES = ["yes","yeah","yep","send it","do it","go ahead","confirm","ok","sure","correct","send","create it","create","add it"].includes(lower);
+  const YES = ["yes","yeah","yep","send it","do it","go ahead","confirm","ok","sure","send","create it","create","add it"].includes(lower);
   const NO = ["no","cancel","nope","stop","abort"].includes(lower);
 
+  // Pending confirmation
   const pending = await loadPending();
   if (pending) {
     if (YES) {
@@ -132,6 +137,7 @@ export default async (req, context) => {
     if (NO){await savePending(null);await send(cid,"Cancelled.");return new Response("OK");}
   }
 
+  // Memory commands
   if(["memory","show memory","what do you remember"].includes(lower)){
     const m=await loadMem();
     if(!m.items?.length){await send(cid,"Nothing saved yet. Try: remember Ed Shaw is Day2 co-founder");return new Response("OK");}
@@ -141,13 +147,16 @@ export default async (req, context) => {
   if(rem){const fact=rem[1].trim();const m=await loadMem();m.items=[...(m.items||[]).filter(i=>i!==fact),fact].slice(-50);await saveMem(m);await send(cid,`Saved. ${m.items.length} item(s) in memory.`);return new Response("OK");}
   const fgt=txt.match(/^forget[:\s]+(.+)$/i);
   if(fgt){const term=fgt[1].trim().toLowerCase();const m=await loadMem();m.items=(m.items||[]).filter(i=>!i.toLowerCase().includes(term));await saveMem(m);await send(cid,`Forgotten: ${fgt[1].trim()}`);return new Response("OK");}
+
+  // Direct commands
   if(["calendar","today","what's on today","my calendar"].includes(lower)){const gt=await getGToken();await send(cid,"Today:\n\n"+await getCalendar(gt,24));return new Response("OK");}
   if(["tomorrow","what's on tomorrow"].includes(lower)){const gt=await getGToken();await send(cid,"Tomorrow:\n\n"+await getCalendar(gt,48));return new Response("OK");}
   if(["emails","inbox","check emails","check my emails"].includes(lower)){const gt=await getGToken();await send(cid,"Inbox:\n\n"+await getEmails(gt));return new Response("OK");}
   if(lower==="clear history"){await saveHist([]);await send(cid,"History cleared.");return new Response("OK");}
 
+  // Claude chat with web search
   try {
-    const [m, hist] = await Promise.all([loadMem(), loadHist()]);
+    const [m, hist, gt] = await Promise.all([loadMem(), loadHist(), getGToken()]);
     const today = new Date().toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
 
     const system = `You are Jarvis, Matt's personal AI on Telegram. Sharp, warm, efficient. Plain text only — no markdown, no asterisks, no bold.
@@ -156,28 +165,45 @@ Matt Ross — CEO Day2Health, Parkinson's platform. BGV accelerator. Northleach 
 Today: ${today}
 ${m.items?.length?"Memory:\n"+m.items.map(i=>"- "+i).join("\n"):""}
 
-You can: send emails, create calendar events, create Google Docs, search Drive.
-When asked, show details and ask for confirmation. Then output the action on the LAST LINE ONLY:
+You can take real actions: send emails, create calendar events, create Google Docs, search Drive.
+When asked, show details and ask confirmation. Then output the action on the LAST LINE ONLY (nothing after it):
 SEND_EMAIL|to@email.com|Subject|Body
 CREATE_EVENT|Title|2026-03-20T14:00:00|2026-03-20T15:00:00|optional@attendee.com
 CREATE_DOC|Document title|Optional content
 SEARCH_DRIVE|search terms
 
-Be concise. Use memory naturally.`;
+Use web search for current info: news, weather, sports, research. Be concise.`;
 
     const messages=[...hist.flatMap(t=>[{role:"user",content:t.u},{role:"assistant",content:t.a}]),{role:"user",content:txt}];
 
     const r=await fetch("https://api.anthropic.com/v1/messages",{
-      method:"POST",headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},
-      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1024,system,messages})
+      method:"POST",
+      headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},
+      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1024,system,messages,tools:[{type:"web_search_20250305",name:"web_search"}]})
     });
     const d=await r.json();
-    let reply=(d.content?.[0]?.text||"No response").trim();
+
+    // Handle tool use — extract only text blocks
+    let reply = (d.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"No response").trim();
+
+    // If Claude used web search, it may need another pass — check if reply is empty
+    if (!reply && d.stop_reason === "tool_use") {
+      // Make a follow-up call with tool results
+      const toolResults = d.content.filter(b=>b.type==="tool_use").map(b=>({
+        type:"tool_result", tool_use_id:b.id, content:"Search completed"
+      }));
+      const r2=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},
+        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1024,system,messages:[...messages,{role:"assistant",content:d.content},{role:"user",content:toolResults}]})
+      });
+      const d2=await r2.json();
+      reply=(d2.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"No response").trim();
+    }
 
     const lines=reply.split("\n");
     const last=lines[lines.length-1].trim();
     const visible=lines.slice(0,-1).join("\n").trim();
-    const gt=await getGToken();
 
     if(last.startsWith("SEND_EMAIL|")){
       const p=last.split("|");
@@ -204,5 +230,3 @@ Be concise. Use memory naturally.`;
 };
 
 export const config = { path: "/telegram" };
-// bust-1773936231
-// token-refresh-1773938969
