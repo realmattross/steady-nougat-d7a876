@@ -1,4 +1,4 @@
-import { getStore } from "@netlify/blobs";
+// @netlify/blobs loaded dynamically
 
 export default async (req, context) => {
   if (req.method !== "POST") return new Response("OK");
@@ -103,6 +103,7 @@ export default async (req, context) => {
     } catch(e){return {error:e.message};}
   };
 
+  const { getStore } = await import("@netlify/blobs");
   const store = getStore("jarvis");
   const loadMem = async () => {try{return(await store.get("memory",{type:"json"}))||{items:[]};}catch(e){return{items:[]};}};
   const saveMem = async (m) => {try{await store.setJSON("memory",m);}catch(e){}};
