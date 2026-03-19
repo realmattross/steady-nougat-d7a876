@@ -1,0 +1,33 @@
+plugins = []
+functionsDirectory = "/Users/mattross/Desktop/jarvis-new/functions"
+functionsDirectoryOrigin = "config-v1"
+headers = []
+redirects = []
+
+[functions]
+
+[functions.telegram]
+timeout = 30.0
+
+[functions."*"]
+node_bundler = "esbuild"
+
+[build]
+publish = "/Users/mattross/Desktop/jarvis-new/public"
+publishOrigin = "config"
+base = "/Users/mattross/Desktop/jarvis-new"
+functions = "/Users/mattross/Desktop/jarvis-new/functions"
+
+[build.environment]
+
+[build.processing]
+
+[build.processing.css]
+
+[build.processing.html]
+
+[build.processing.images]
+
+[build.processing.js]
+
+[build.services]

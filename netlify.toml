@@ -1,0 +1,9 @@
+[build]
+  publish = "public"
+  functions = "functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+[functions."telegram"]
+  timeout = 30
