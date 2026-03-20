@@ -209,7 +209,7 @@ Use web search for current info: news, weather, sports, research. Be concise.`;
     if(last.startsWith("SEND_EMAIL|")){
       const p=last.split("|");
       await savePending({type:"email",to:p[1]?.trim(),subject:p[2]?.trim(),body:p.slice(3).join("|").trim()});
-      await send(cid,clean(visible||`Ready to send to ${p[1]?.trim()}. Shall I send this?`);
+      await send(cid,clean(visible||`Ready to send to ${p[1]?.trim()}. Shall I send this?`));
     } else if(last.startsWith("CREATE_EVENT|")){
       const p=last.split("|");
       await savePending({type:"event",title:p[1]?.trim(),start:p[2]?.trim(),end:p[3]?.trim(),attendees:p[4]?p[4].split(",").map(e=>e.trim()):[]});
