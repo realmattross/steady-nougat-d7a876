@@ -117,7 +117,8 @@ export default async (req, context) => {
   const saveHist = async (t) => {try{await store.setJSON("hist-"+cid,{t:t.slice(-10)});}catch(e){}};
 
   const lower = txt.toLowerCase().trim();
-  const YES = ["yes","yeah","yep","send it","do it","go ahead","confirm","ok","sure","send","create it","create","add it"].includes(lower);
+  const yesWords = ["yes","yeah","yep","send it","do it","go ahead","confirm","ok","sure","send","create it","create","add it","y","sent","correct","go","proceed","do this","that's right","right","approved"];
+  const YES = yesWords.includes(lower) || lower.startsWith("yes") || lower.startsWith("y ");
   const NO = ["no","cancel","nope","stop","abort"].includes(lower);
 
   // Pending confirmation
@@ -163,7 +164,7 @@ export default async (req, context) => {
 
 Matt Ross — CEO Day2Health, Parkinson's platform. BGV accelerator. Northleach Cotswolds. Ex-Google/YouTube.
 Today: ${today}
-${m.items?.length?"Memory:\n"+m.items.map(i=>"- "+i).join("\n"):""}
+${m.items?.length?"IMPORTANT MEMORY — always apply these in conversation:\n"+m.items.map(i=>"- "+i).join("\n"):""}
 
 You can take real actions: send emails, create calendar events, create Google Docs, search Drive.
 When asked, show details and ask confirmation. Then output the action on the LAST LINE ONLY (nothing after it):
@@ -208,7 +209,7 @@ Use web search for current info: news, weather, sports, research. Be concise.`;
     if(last.startsWith("SEND_EMAIL|")){
       const p=last.split("|");
       await savePending({type:"email",to:p[1]?.trim(),subject:p[2]?.trim(),body:p.slice(3).join("|").trim()});
-      await send(cid,visible||`Ready to send to ${p[1]?.trim()}. Shall I send this?`);
+      await send(cid,clean(visible||`Ready to send to ${p[1]?.trim()}. Shall I send this?`);
     } else if(last.startsWith("CREATE_EVENT|")){
       const p=last.split("|");
       await savePending({type:"event",title:p[1]?.trim(),start:p[2]?.trim(),end:p[3]?.trim(),attendees:p[4]?p[4].split(",").map(e=>e.trim()):[]});
@@ -223,10 +224,14 @@ Use web search for current info: news, weather, sports, research. Be concise.`;
       await send(cid,(visible?visible+"\n\n":"")+results);
     } else {
       await saveHist([...hist,{u:txt.substring(0,400),a:reply.substring(0,800)}]);
-      await send(cid,reply);
+      await send(cid,clean(reply));
     }
   } catch(err){await send(cid,"ERROR: "+err.message?.slice(0,200));}
   return new Response("OK");
 };
+
+function clean(t) {
+  return t.replace(/\*\*([^*]+)\*\*/g,"$1").replace(/\*([^*]+)\*/g,"$1").replace(/^#{1,6} /gm,"").replace(/`([^`]+)`/g,"$1");
+}
 
 export const config = { path: "/telegram" };
