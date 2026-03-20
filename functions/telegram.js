@@ -46,8 +46,10 @@ export default async (req, context) => {
         }
       );
 
-      if (!elRes.ok) return;
-
+if (!elRes.ok) {
+  console.error("ElevenLabs error:", elRes.status, await elRes.text());
+  return;
+}
       const audioBuffer = await elRes.arrayBuffer();
       const formData = new FormData();
       formData.append("chat_id", c);
