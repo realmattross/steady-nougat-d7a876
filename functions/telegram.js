@@ -6,13 +6,64 @@ export default async (req, context) => {
   const gcid = Netlify.env.get("GOOGLE_CLIENT_ID");
   const gcs = Netlify.env.get("GOOGLE_CLIENT_SECRET");
   const grt = Netlify.env.get("GOOGLE_REFRESH_TOKEN");
+  const elKey = Netlify.env.get("ELEVENLABS_API_KEY");
+  const elVoice = Netlify.env.get("ELEVENLABS_VOICE_ID") || "onwK4e9ZLuTAKqWW03F9";
   if (!tok || !key) return new Response("OK");
 
+  // Send plain text message
   const send = async (c, t) => {
     await fetch("https://api.telegram.org/bot"+tok+"/sendMessage", {
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({chat_id:c, text:t.slice(0,4096), disable_web_page_preview:true})
     });
+  };
+
+  // Send text + voice message (used for Claude conversation replies only)
+  const speakAndSend = async (c, t) => {
+    await send(c, t);
+    if (!elKey) return;
+    try {
+      const stripped = t
+        .replace(/\*\*([^*]+)\*\*/g, "$1")
+        .replace(/\*([^*]+)\*/g, "$1")
+        .replace(/`([^`]+)`/g, "$1")
+        .replace(/#{1,6}\s/g, "")
+        .slice(0, 5000);
+
+      const elRes = await fetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${elVoice}/stream`,
+        {
+          method: "POST",
+          headers: {
+            "xi-api-key": elKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            text: stripped,
+            model_id: "eleven_flash_v2_5",
+            voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+          }),
+        }
+      );
+
+      if (!elRes.ok) return;
+
+      const audioBuffer = await elRes.arrayBuffer();
+      const formData = new FormData();
+      formData.append("chat_id", c);
+      formData.append(
+        "voice",
+        new Blob([audioBuffer], { type: "audio/mpeg" }),
+        "jarvis.mp3"
+      );
+
+      await fetch(`https://api.telegram.org/bot${tok}/sendVoice`, {
+        method: "POST",
+        body: formData,
+      });
+    } catch (err) {
+      console.error("Voice error (non-fatal):", err.message);
+    }
   };
 
   let body; try { body = await req.json(); } catch(e) { return new Response("OK"); }
@@ -138,7 +189,7 @@ export default async (req, context) => {
     if (NO){await savePending(null);await send(cid,"Cancelled.");return new Response("OK");}
   }
 
-  // Memory commands
+  // Memory commands (text only — no voice for system operations)
   if(["memory","show memory","what do you remember"].includes(lower)){
     const m=await loadMem();
     if(!m.items?.length){await send(cid,"Nothing saved yet. Try: remember Ed Shaw is Day2 co-founder");return new Response("OK");}
@@ -149,13 +200,13 @@ export default async (req, context) => {
   const fgt=txt.match(/^forget[:\s]+(.+)$/i);
   if(fgt){const term=fgt[1].trim().toLowerCase();const m=await loadMem();m.items=(m.items||[]).filter(i=>!i.toLowerCase().includes(term));await saveMem(m);await send(cid,`Forgotten: ${fgt[1].trim()}`);return new Response("OK");}
 
-  // Direct commands
+  // Direct commands (text only — no voice for quick lookups)
   if(["calendar","today","what's on today","my calendar"].includes(lower)){const gt=await getGToken();await send(cid,"Today:\n\n"+await getCalendar(gt,24));return new Response("OK");}
   if(["tomorrow","what's on tomorrow"].includes(lower)){const gt=await getGToken();await send(cid,"Tomorrow:\n\n"+await getCalendar(gt,48));return new Response("OK");}
   if(["emails","inbox","check emails","check my emails"].includes(lower)){const gt=await getGToken();await send(cid,"Inbox:\n\n"+await getEmails(gt));return new Response("OK");}
   if(lower==="clear history"){await saveHist([]);await send(cid,"History cleared.");return new Response("OK");}
 
-  // Claude chat with web search
+  // Claude chat — uses speakAndSend for voice replies
   try {
     const [m, hist, gt] = await Promise.all([loadMem(), loadHist(), getGToken()]);
     const today = new Date().toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
@@ -184,12 +235,9 @@ Use web search for current info: news, weather, sports, research. Be concise.`;
     });
     const d=await r.json();
 
-    // Handle tool use — extract only text blocks
     let reply = (d.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"No response").trim();
 
-    // If Claude used web search, it may need another pass — check if reply is empty
     if (!reply && d.stop_reason === "tool_use") {
-      // Make a follow-up call with tool results
       const toolResults = d.content.filter(b=>b.type==="tool_use").map(b=>({
         type:"tool_result", tool_use_id:b.id, content:"Search completed"
       }));
@@ -209,22 +257,22 @@ Use web search for current info: news, weather, sports, research. Be concise.`;
     if(last.startsWith("SEND_EMAIL|")){
       const p=last.split("|");
       await savePending({type:"email",to:p[1]?.trim(),subject:p[2]?.trim(),body:p.slice(3).join("|").trim()});
-      await send(cid,clean(visible||`Ready to send to ${p[1]?.trim()}. Shall I send this?`));
+      await speakAndSend(cid,clean(visible||`Ready to send to ${p[1]?.trim()}. Shall I send this?`));
     } else if(last.startsWith("CREATE_EVENT|")){
       const p=last.split("|");
       await savePending({type:"event",title:p[1]?.trim(),start:p[2]?.trim(),end:p[3]?.trim(),attendees:p[4]?p[4].split(",").map(e=>e.trim()):[]});
-      await send(cid,visible||`Ready to create: ${p[1]?.trim()}. Shall I add this?`);
+      await speakAndSend(cid,visible||`Ready to create: ${p[1]?.trim()}. Shall I add this?`);
     } else if(last.startsWith("CREATE_DOC|")){
       const p=last.split("|");
       await savePending({type:"doc",title:p[1]?.trim(),content:p.slice(2).join("|").trim()});
-      await send(cid,visible||`Ready to create Google Doc: "${p[1]?.trim()}". Shall I create it?`);
+      await speakAndSend(cid,visible||`Ready to create Google Doc: "${p[1]?.trim()}". Shall I create it?`);
     } else if(last.startsWith("SEARCH_DRIVE|")){
       const results=await searchDrive(gt,last.replace("SEARCH_DRIVE|","").trim());
       await saveHist([...hist,{u:txt.substring(0,400),a:reply.substring(0,800)}]);
       await send(cid,(visible?visible+"\n\n":"")+results);
     } else {
       await saveHist([...hist,{u:txt.substring(0,400),a:reply.substring(0,800)}]);
-      await send(cid,clean(reply));
+      await speakAndSend(cid,clean(reply));
     }
   } catch(err){await send(cid,"ERROR: "+err.message?.slice(0,200));}
   return new Response("OK");
@@ -233,4 +281,3 @@ Use web search for current info: news, weather, sports, research. Be concise.`;
 function clean(t){return t.replace(/\*\*([^*]+)\*\*/g,"$1").replace(/\*([^*]+)\*/g,"$1").replace(/`([^`]+)`/g,"$1");}
 
 export const config = { path: "/telegram" };
-// redeploy-1773972778
