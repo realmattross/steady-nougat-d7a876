@@ -233,9 +233,6 @@ Use web search for current info: news, weather, sports, research. Be concise.`;
   return t.replace(/\*\*([^*]+)\*\*/g,"$1").replace(/\*([^*]+)\*/g,"$1").replace(/^#{1,6} /gm,"").replace(/`([^`]+)`/g,"$1");
 }
 
-
-
+function clean(t){return t.replace(/\*\*([^*]+)\*\*/g,"$1").replace(/\*([^*]+)\*/g,"$1").replace(/`([^`]+)`/g,"$1");}
 
 export const config = { path: "/telegram" };
-
-function clean(t){return t.replace(/\*\*([^*]+)\*\*/g,"$1").replace(/\*([^*]+)\*/g,"$1").replace(/`([^`]+)`/g,"$1");}
