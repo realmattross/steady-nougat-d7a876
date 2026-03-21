@@ -74,7 +74,7 @@ if (!elRes.ok) {
   const cid = String(msg.chat?.id);
   const txt = msg.text?.trim();
   if (aid && cid !== String(aid)) return new Response("OK");
-  if (!txt) return new Response("OK");
+  if (!txt && !msg.photo && !msg.document) return new Response("OK");
   if (txt === "/start") { await send(cid, "Jarvis online."); return new Response("OK"); }
 
   // Google token
