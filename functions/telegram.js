@@ -89,6 +89,25 @@ if (!elRes.ok) {
     } catch(e) { return null; }
   };
 
+  // Download file from Telegram
+  const getTelegramFile = async (fileId) => {
+    const r = await fetch(`https://api.telegram.org/bot${tok}/getFile?file_id=${fileId}`);
+    const d = await r.json();
+    if (!d.ok) return null;
+    const filePath = d.result.file_path;
+    const fileRes = await fetch(`https://api.telegram.org/file/bot${tok}/${filePath}`);
+    const buffer = await fileRes.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+    return {
+      base64: btoa(binary),
+      mimeType: filePath.endsWith('.pdf') ? 'application/pdf' : 
+                filePath.endsWith('.png') ? 'image/png' : 'image/jpeg',
+      isImage: !filePath.endsWith('.pdf')
+    };
+  };
+
   // Calendar
   const getCalendar = async (gt, hours=24) => {
     if (!gt) return "Calendar unavailable";
@@ -168,6 +187,32 @@ if (!elRes.ok) {
   const savePending = async (p) => {try{if(p)await store.setJSON("pending-"+cid,p);else await store.delete("pending-"+cid);}catch(e){}};
   const loadHist = async () => {try{return((await store.get("hist-"+cid,{type:"json"}))||{t:[]}).t;}catch(e){return[];}};
   const saveHist = async (t) => {try{await store.setJSON("hist-"+cid,{t:t.slice(-10)});}catch(e){}};
+
+  // Handle photo messages
+  if (msg.photo || msg.document) {
+    const fileId = msg.photo ? msg.photo[msg.photo.length-1].file_id : msg.document.file_id;
+    const caption = msg.caption || (msg.photo ? "What's in this image?" : "Summarise this document");
+    try {
+      const file = await getTelegramFile(fileId);
+      if (!file) { await send(cid, "Could not download the file."); return new Response("OK"); }
+      const [m, hist] = await Promise.all([loadMem(), loadHist()]);
+      const today = new Date().toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
+      const system = `You are Jarvis, Matt's personal AI on Telegram. Sharp, warm, efficient. Plain text only. Today: ${today}. ${m.items?.length?"Memory:\n"+m.items.map(i=>"- "+i).join("\n"):""}`;
+      const content = file.isImage
+        ? [{type:"image",source:{type:"base64",media_type:file.mimeType,data:file.base64}},{type:"text",text:caption}]
+        : [{type:"document",source:{type:"base64",media_type:"application/pdf",data:file.base64}},{type:"text",text:caption}];
+      const r = await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},
+        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1024,system,messages:[...hist.flatMap(t=>[{role:"user",content:t.u},{role:"assistant",content:t.a}]),{role:"user",content}]})
+      });
+      const d = await r.json();
+      const reply = clean(d.content?.[0]?.text || "Could not process the file.");
+      await saveHist([...hist,{u:"[sent a file: "+caption+"]",a:reply.substring(0,800)}]);
+      await send(cid, reply);
+    } catch(err) { await send(cid, "Error processing file: "+err.message?.slice(0,100)); }
+    return new Response("OK");
+  }
 
   const lower = txt.toLowerCase().trim();
   const yesWords = ["yes","yeah","yep","send it","do it","go ahead","confirm","ok","sure","send","create it","create","add it","y","sent","correct","go","proceed","do this","that's right","right","approved"];
