@@ -207,6 +207,12 @@ if (!elRes.ok) {
   if(["tomorrow","what's on tomorrow"].includes(lower)){const gt=await getGToken();await send(cid,"Tomorrow:\n\n"+await getCalendar(gt,48));return new Response("OK");}
   if(["emails","inbox","check emails","check my emails"].includes(lower)){const gt=await getGToken();await send(cid,"Inbox:\n\n"+await getEmails(gt));return new Response("OK");}
   if(lower==="clear history"){await saveHist([]);await send(cid,"History cleared.");return new Response("OK");}
+  if(["briefing","brief me","morning briefing","daily briefing","give me a briefing"].includes(lower)){
+    const gt=await getGToken();
+    const [cal,inbox]=await Promise.all([getCalendar(gt,24),getEmails(gt)]);
+    await send(cid,"Calendar:\n\n"+cal+"\n\nInbox:\n\n"+inbox);
+    return new Response("OK");
+  }
 
   // Claude chat — uses speakAndSend for voice replies
   try {
