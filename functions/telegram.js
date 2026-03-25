@@ -252,6 +252,59 @@ if (!elRes.ok) {
   if(["tomorrow","what's on tomorrow"].includes(lower)){const gt=await getGToken();await send(cid,"Tomorrow:\n\n"+await getCalendar(gt,48));return new Response("OK");}
   if(["emails","inbox","check emails","check my emails"].includes(lower)){const gt=await getGToken();await send(cid,"Inbox:\n\n"+await getEmails(gt));return new Response("OK");}
   if(lower==="clear history"){await saveHist([]);await send(cid,"History cleared.");return new Response("OK");}
+  // Train command - Kingham to Paddington
+  if(["next train","trains","train times","next train to london","trains to london","trains to paddington","kingham to paddington"].some(p => lower.includes(p))){
+    const appId = Netlify.env.get("TRANSPORT_APP_ID");
+    const appKey = Netlify.env.get("TRANSPORT_APP_KEY");
+    try {
+      const url = `https://transportapi.com/v3/uk/train/station/KGM/live.json?app_id=${appId}&app_key=${appKey}&calling_at=PAD&type=departure`;
+      const r = await fetch(url);
+      const d = await r.json();
+      const services = d.departures?.all || [];
+      if(!services.length){ await send(cid, "No trains from Kingham to Paddington right now."); return new Response("OK"); }
+      const lines = services.slice(0,4).map(s => {
+        const time = s.aimed_departure_time || s.expected_departure_time || "?";
+        const expected = s.expected_departure_time && s.expected_departure_time !== s.aimed_departure_time ? ` (exp ${s.expected_departure_time})` : "";
+        const status = s.status === "ON TIME" ? "✅ On time" : s.status === "CANCELLED" ? "❌ Cancelled" : `⚠️ ${s.status}`;
+        const platform = s.platform ? ` · Plat ${s.platform}` : "";
+        const operator = s.operator_name || "";
+        return `🚂 ${time}${expected} → Paddington · ${status}${platform} · ${operator}`;
+      });
+      await send(cid, `Kingham → Paddington\n\n${lines.join("\n")}`);
+    } catch(e) {
+      await send(cid, "Could not fetch train times: " + e.message);
+    }
+    return new Response("OK");
+  }
+  // Order food command
+  // Usage: "order food kfc Bargain Bucket: 6 pc" or "order food burger king Whopper meal"
+  if(lower.startsWith("order food") || lower.startsWith("order kfc") || lower.startsWith("order burger") || lower.startsWith("order mcd") || lower.startsWith("order gdk")){
+    const FOOD_URL = Netlify.env.get("FOOD_SERVER_URL") || "";
+    if(!FOOD_URL){ await send(cid, "Food server URL not configured."); return new Response("OK"); }
+    const restaurants = ["burger king","mcdonalds","mcdonald's","kfc","gdk"];
+    let restaurant = "kfc";
+    let item = "Bargain Bucket: 6 pc";
+    const body = txt.replace(/^order\s+food\s*/i,"").trim();
+    for(const r of restaurants){
+      if(body.toLowerCase().startsWith(r)){
+        restaurant = r;
+        item = body.slice(r.length).trim() || item;
+        break;
+      }
+    }
+    try {
+      const r = await fetch(FOOD_URL, {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({restaurant, item})
+      });
+      const d = await r.json();
+      await send(cid, "🍔 Order started!\n\nRestaurant: "+d.restaurant+"\nItem: "+d.item+"\n\nChrome is opening Uber Eats. Check your Mac — it stops at checkout for you to confirm.");
+    } catch(e) {
+      await send(cid, "Could not reach your Mac. Make sure jarvis_food_server.py and Chrome are running. Error: "+e.message);
+    }
+    return new Response("OK");
+  }
   if(["briefing","brief me","morning briefing","daily briefing","give me a briefing"].includes(lower)){
     const gt=await getGToken();
     const [cal,inbox]=await Promise.all([getCalendar(gt,24),getEmails(gt)]);
