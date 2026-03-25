@@ -8,6 +8,7 @@ export default async (req, context) => {
   const grt = Netlify.env.get("GOOGLE_REFRESH_TOKEN");
   const elKey = Netlify.env.get("ELEVENLABS_API_KEY");
   const elVoice = Netlify.env.get("ELEVENLABS_VOICE_ID") || "onwK4e9ZLuTAKqWW03F9";
+  const mapsKey = Netlify.env.get("GOOGLE_MAPS_KEY");
   if (!tok || !key) return new Response("OK");
 
   // Send plain text message
@@ -29,15 +30,11 @@ export default async (req, context) => {
         .replace(/`([^`]+)`/g, "$1")
         .replace(/#{1,6}\s/g, "")
         .slice(0, 5000);
-
       const elRes = await fetch(
         `https://api.elevenlabs.io/v1/text-to-speech/${elVoice}/stream`,
         {
           method: "POST",
-          headers: {
-            "xi-api-key": elKey,
-            "Content-Type": "application/json",
-          },
+          headers: { "xi-api-key": elKey, "Content-Type": "application/json" },
           body: JSON.stringify({
             text: stripped,
             model_id: "eleven_flash_v2_5",
@@ -45,24 +42,12 @@ export default async (req, context) => {
           }),
         }
       );
-
-if (!elRes.ok) {
-  console.error("ElevenLabs error:", elRes.status, await elRes.text());
-  return;
-}
+      if (!elRes.ok) { console.error("ElevenLabs error:", elRes.status, await elRes.text()); return; }
       const audioBuffer = await elRes.arrayBuffer();
       const formData = new FormData();
       formData.append("chat_id", c);
-      formData.append(
-        "voice",
-        new Blob([audioBuffer], { type: "audio/mpeg" }),
-        "jarvis.mp3"
-      );
-
-      await fetch(`https://api.telegram.org/bot${tok}/sendVoice`, {
-        method: "POST",
-        body: formData,
-      });
+      formData.append("voice", new Blob([audioBuffer], { type: "audio/mpeg" }), "jarvis.mp3");
+      await fetch(`https://api.telegram.org/bot${tok}/sendVoice`, { method: "POST", body: formData });
     } catch (err) {
       console.error("Voice error (non-fatal):", err.message);
     }
@@ -102,8 +87,7 @@ if (!elRes.ok) {
     for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
     return {
       base64: btoa(binary),
-      mimeType: filePath.endsWith('.pdf') ? 'application/pdf' : 
-                filePath.endsWith('.png') ? 'image/png' : 'image/jpeg',
+      mimeType: filePath.endsWith('.pdf') ? 'application/pdf' : filePath.endsWith('.png') ? 'image/png' : 'image/jpeg',
       isImage: !filePath.endsWith('.pdf')
     };
   };
@@ -178,6 +162,101 @@ if (!elRes.ok) {
     } catch(e){return {error:e.message};}
   };
 
+  // ── GOOGLE MAPS ────────────────────────────────────────────────────────────
+  const HOME_LOCATION = 'Northleach, Cotswolds, GL54 3JH, UK';
+
+  const isMapsQuery = (t) => {
+    const l = t.toLowerCase();
+    return (
+      /how long (to|does it take|will it take)|travel time|drive to|get to|eta to/.test(l) ||
+      /how far (is|to)|distance to/.test(l) ||
+      /directions? (to|from)|route to|how do i get to|navigate to/.test(l) ||
+      /near(by| me| here)|(closest|nearest)\s/.test(l) ||
+      /find (a |an |the )?(pub|petrol|garage|restaurant|cafe|coffee|hotel|pharmacy|hospital|vet|supermarket|shop|station|gym|park|school)/.test(l)
+    );
+  };
+
+  const handleMapsQuery = async (t) => {
+    if (!mapsKey) return "Google Maps not configured. Add GOOGLE_MAPS_KEY to Netlify env vars.";
+
+    // Use Claude to extract structured intent
+    const extractRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 200,
+        system: `Extract location intent from a query. Respond ONLY with raw JSON — no markdown, no backticks.
+Matt lives in Northleach, Cotswolds GL54. Use as origin if none specified.
+Return exactly: {"intent":"travel_time"|"directions"|"nearby","origin":"...","destination":"...","search_query":"..."}
+For nearby: search_query = what to search for (e.g. "petrol station", "pub"). Leave unused fields null.`,
+        messages: [{ role: 'user', content: t }]
+      })
+    });
+    const extractData = await extractRes.json();
+    let parsed;
+    try { parsed = JSON.parse(extractData.content[0].text.trim()); }
+    catch(e) { return "Couldn't understand that Maps request."; }
+
+    if (parsed.intent === 'nearby') {
+      const loc = parsed.origin || HOME_LOCATION;
+      // Geocode location first
+      const geoRes = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(loc)}&key=${mapsKey}`);
+      const geoData = await geoRes.json();
+      if (geoData.status !== 'OK') return `Couldn't locate "${loc}".`;
+      const { lat, lng } = geoData.results[0].geometry.location;
+      // Text search nearby
+      const searchRes = await fetch(`https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(parsed.search_query)}&location=${lat},${lng}&radius=10000&key=${mapsKey}`);
+      const searchData = await searchRes.json();
+      const places = (searchData.results || []).slice(0, 5);
+      if (!places.length) return `No ${parsed.search_query} found nearby.`;
+      let reply = `Nearest ${parsed.search_query}:\n\n`;
+      places.forEach((p, i) => {
+        reply += `${i+1}. ${p.name}\n   ${p.formatted_address}`;
+        if (p.rating) reply += `\n   ⭐ ${p.rating}/5`;
+        if (p.opening_hours?.open_now !== undefined) reply += `  ${p.opening_hours.open_now ? '🟢 Open' : '🔴 Closed'}`;
+        reply += '\n\n';
+      });
+      reply += `🗺 https://www.google.com/maps/search/${encodeURIComponent(parsed.search_query + ' near ' + loc)}`;
+      return reply;
+
+    } else if (parsed.intent === 'directions') {
+      const origin = encodeURIComponent(parsed.origin || HOME_LOCATION);
+      const dest = encodeURIComponent(parsed.destination);
+      const res = await fetch(`https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${dest}&mode=driving&key=${mapsKey}`);
+      const data = await res.json();
+      if (data.status !== 'OK') return `Couldn't get directions to ${parsed.destination}.`;
+      const leg = data.routes[0].legs[0];
+      const steps = leg.steps.slice(0, 8).map((s, i) => {
+        const instr = s.html_instructions.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        return `${i+1}. ${instr} (${s.distance.text})`;
+      });
+      let reply = `🗺 ${leg.start_address} → ${leg.end_address}\n`;
+      reply += `📏 ${leg.distance.text}  ⏱ ${leg.duration.text}\n\n`;
+      reply += steps.join('\n');
+      reply += `\n\n🗺 https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(parsed.origin||HOME_LOCATION)}&destination=${encodeURIComponent(parsed.destination)}&travelmode=driving`;
+      return reply;
+
+    } else {
+      // travel_time / ETA
+      const origin = encodeURIComponent(parsed.origin || HOME_LOCATION);
+      const dest = encodeURIComponent(parsed.destination);
+      const res = await fetch(`https://maps.googleapis.com/maps/api/distancematrix/json?origins=${origin}&destinations=${dest}&mode=driving&departure_time=now&key=${mapsKey}`);
+      const data = await res.json();
+      if (data.status !== 'OK') return `Couldn't calculate travel time to ${parsed.destination}.`;
+      const el = data.rows[0]?.elements[0];
+      if (!el || el.status !== 'OK') return `No route found to ${parsed.destination}.`;
+      let reply = `🗺 ${data.origin_addresses[0]} → ${data.destination_addresses[0]}\n\n`;
+      reply += `⏱ ${el.duration.text}`;
+      if (el.duration_in_traffic?.text && el.duration_in_traffic.text !== el.duration.text)
+        reply += ` (${el.duration_in_traffic.text} with current traffic)`;
+      reply += `\n📏 ${el.distance.text}`;
+      reply += `\n\n🗺 https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(parsed.origin||HOME_LOCATION)}&destination=${encodeURIComponent(parsed.destination)}&travelmode=driving`;
+      return reply;
+    }
+  };
+  // ── END GOOGLE MAPS ────────────────────────────────────────────────────────
+
   // Memory via Netlify Blobs
   const { getStore } = await import("@netlify/blobs");
   const store = getStore("jarvis");
@@ -236,7 +315,7 @@ if (!elRes.ok) {
     if (NO){await savePending(null);await send(cid,"Cancelled.");return new Response("OK");}
   }
 
-  // Memory commands (text only — no voice for system operations)
+  // Memory commands
   if(["memory","show memory","what do you remember"].includes(lower)){
     const m=await loadMem();
     if(!m.items?.length){await send(cid,"Nothing saved yet. Try: remember Ed Shaw is Day2 co-founder");return new Response("OK");}
@@ -247,12 +326,13 @@ if (!elRes.ok) {
   const fgt=txt.match(/^forget[:\s]+(.+)$/i);
   if(fgt){const term=fgt[1].trim().toLowerCase();const m=await loadMem();m.items=(m.items||[]).filter(i=>!i.toLowerCase().includes(term));await saveMem(m);await send(cid,`Forgotten: ${fgt[1].trim()}`);return new Response("OK");}
 
-  // Direct commands (text only — no voice for quick lookups)
+  // Direct commands
   if(["calendar","today","what's on today","my calendar"].includes(lower)){const gt=await getGToken();await send(cid,"Today:\n\n"+await getCalendar(gt,24));return new Response("OK");}
   if(["tomorrow","what's on tomorrow"].includes(lower)){const gt=await getGToken();await send(cid,"Tomorrow:\n\n"+await getCalendar(gt,48));return new Response("OK");}
   if(["emails","inbox","check emails","check my emails"].includes(lower)){const gt=await getGToken();await send(cid,"Inbox:\n\n"+await getEmails(gt));return new Response("OK");}
   if(lower==="clear history"){await saveHist([]);await send(cid,"History cleared.");return new Response("OK");}
-  // Train command - Kingham to Paddington
+
+  // Train command
   if(["next train","trains","train times","next train to london","trains to london","trains to paddington","kingham to paddington"].some(p => lower.includes(p))){
     const appId = Netlify.env.get("TRANSPORT_APP_ID");
     const appKey = Netlify.env.get("TRANSPORT_APP_KEY");
@@ -267,44 +347,32 @@ if (!elRes.ok) {
         const expected = s.expected_departure_time && s.expected_departure_time !== s.aimed_departure_time ? ` (exp ${s.expected_departure_time})` : "";
         const status = s.status === "ON TIME" ? "✅ On time" : s.status === "CANCELLED" ? "❌ Cancelled" : `⚠️ ${s.status}`;
         const platform = s.platform ? ` · Plat ${s.platform}` : "";
-        const operator = s.operator_name || "";
-        return `🚂 ${time}${expected} → Paddington · ${status}${platform} · ${operator}`;
+        return `🚂 ${time}${expected} → Paddington · ${status}${platform} · ${s.operator_name||""}`;
       });
       await send(cid, `Kingham → Paddington\n\n${lines.join("\n")}`);
-    } catch(e) {
-      await send(cid, "Could not fetch train times: " + e.message);
-    }
+    } catch(e) { await send(cid, "Could not fetch train times: " + e.message); }
     return new Response("OK");
   }
-  // Order food command
-  // Usage: "order food kfc Bargain Bucket: 6 pc" or "order food burger king Whopper meal"
+
+  // Food ordering
   if(lower.startsWith("order food") || lower.startsWith("order kfc") || lower.startsWith("order burger") || lower.startsWith("order mcd") || lower.startsWith("order gdk")){
     const FOOD_URL = Netlify.env.get("FOOD_SERVER_URL") || "";
     if(!FOOD_URL){ await send(cid, "Food server URL not configured."); return new Response("OK"); }
     const restaurants = ["burger king","mcdonalds","mcdonald's","kfc","gdk"];
-    let restaurant = "kfc";
-    let item = "Bargain Bucket: 6 pc";
-    const body = txt.replace(/^order\s+food\s*/i,"").trim();
-    for(const r of restaurants){
-      if(body.toLowerCase().startsWith(r)){
-        restaurant = r;
-        item = body.slice(r.length).trim() || item;
-        break;
-      }
+    let restaurant = "kfc", item = "Bargain Bucket: 6 pc";
+    const orderBody = txt.replace(/^order\s+food\s*/i,"").trim();
+    for(const res of restaurants){
+      if(orderBody.toLowerCase().startsWith(res)){ restaurant=res; item=orderBody.slice(res.length).trim()||item; break; }
     }
     try {
-      const r = await fetch(FOOD_URL, {
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({restaurant, item})
-      });
+      const r = await fetch(FOOD_URL, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({restaurant,item}) });
       const d = await r.json();
       await send(cid, "🍔 Order started!\n\nRestaurant: "+d.restaurant+"\nItem: "+d.item+"\n\nChrome is opening Uber Eats. Check your Mac — it stops at checkout for you to confirm.");
-    } catch(e) {
-      await send(cid, "Could not reach your Mac. Make sure jarvis_food_server.py and Chrome are running. Error: "+e.message);
-    }
+    } catch(e) { await send(cid, "Could not reach your Mac. Make sure jarvis_food_server.py and Chrome are running. Error: "+e.message); }
     return new Response("OK");
   }
+
+  // Briefing
   if(["briefing","brief me","morning briefing","daily briefing","give me a briefing"].includes(lower)){
     const gt=await getGToken();
     const [cal,inbox]=await Promise.all([getCalendar(gt,24),getEmails(gt)]);
@@ -312,11 +380,22 @@ if (!elRes.ok) {
     return new Response("OK");
   }
 
-  // Claude chat — uses speakAndSend for voice replies
+  // ── MAPS ROUTING — before Claude chat ──────────────────────────────────────
+  if (isMapsQuery(txt)) {
+    try {
+      const mapsReply = await handleMapsQuery(txt);
+      await speakAndSend(cid, mapsReply);
+    } catch(e) {
+      await send(cid, "Maps error: " + e.message);
+    }
+    return new Response("OK");
+  }
+  // ── END MAPS ROUTING ───────────────────────────────────────────────────────
+
+  // Claude chat
   try {
     const [m, hist, gt] = await Promise.all([loadMem(), loadHist(), getGToken()]);
     const today = new Date().toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
-
     const system = `You are Jarvis, Matt's personal AI on Telegram. Sharp, warm, efficient. Plain text only — no markdown, no asterisks, no bold.
 
 Matt Ross — CEO Day2Health, Parkinson's platform. BGV accelerator. Northleach Cotswolds. Ex-Google/YouTube.
@@ -333,20 +412,15 @@ SEARCH_DRIVE|search terms
 Use web search for current info: news, weather, sports, research. Be concise.`;
 
     const messages=[...hist.flatMap(t=>[{role:"user",content:t.u},{role:"assistant",content:t.a}]),{role:"user",content:txt}];
-
     const r=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},
       body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1024,system,messages,tools:[{type:"web_search_20250305",name:"web_search"}]})
     });
     const d=await r.json();
-
     let reply = (d.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"No response").trim();
-
     if (!reply && d.stop_reason === "tool_use") {
-      const toolResults = d.content.filter(b=>b.type==="tool_use").map(b=>({
-        type:"tool_result", tool_use_id:b.id, content:"Search completed"
-      }));
+      const toolResults = d.content.filter(b=>b.type==="tool_use").map(b=>({type:"tool_result",tool_use_id:b.id,content:"Search completed"}));
       const r2=await fetch("https://api.anthropic.com/v1/messages",{
         method:"POST",
         headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},
@@ -355,11 +429,9 @@ Use web search for current info: news, weather, sports, research. Be concise.`;
       const d2=await r2.json();
       reply=(d2.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"No response").trim();
     }
-
     const lines=reply.split("\n");
     const last=lines[lines.length-1].trim();
     const visible=lines.slice(0,-1).join("\n").trim();
-
     if(last.startsWith("SEND_EMAIL|")){
       const p=last.split("|");
       await savePending({type:"email",to:p[1]?.trim(),subject:p[2]?.trim(),body:p.slice(3).join("|").trim()});
