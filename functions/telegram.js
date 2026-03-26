@@ -409,7 +409,13 @@ CREATE_EVENT|Title|2026-03-20T14:00:00|2026-03-20T15:00:00|optional@attendee.com
 CREATE_DOC|Document title|Optional content
 SEARCH_DRIVE|search terms
 
-Use web search for current info: news, weather, sports, research. Be concise.`;
+Use web search for current info: news, weather, sports, research. Be concise.
+
+LOCAL RESTAURANT BOOKINGS — Matt's locals, book by email on his behalf:
+- Sherbourne Arms, Northleach: info@thesherbornenorthleach.com
+- The Wheatsheaf, Northleach: bookings.wheatsheafinn@youngs.co.uk
+- The Stump, nr Cirencester: phone only — 01285 720288, tell Matt to call.
+When asked to book a table, if date/time/party size not given ask for them first. Then draft a short warm email: "Hi, I'd like to book a table for [X] on [date] at [time]. Many thanks, Matt Ross." Ask confirmation before sending.`;
 
     const messages=[...hist.flatMap(t=>[{role:"user",content:t.u},{role:"assistant",content:t.a}]),{role:"user",content:txt}];
     const r=await fetch("https://api.anthropic.com/v1/messages",{
