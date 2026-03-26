@@ -1,467 +1,244 @@
-export default async (req, context) => {
-  if (req.method !== "POST") return new Response("OK");
-  const tok = Netlify.env.get("TELEGRAM_BOT_TOKEN");
-  const key = Netlify.env.get("ANTHROPIC_API_KEY");
-  const aid = Netlify.env.get("TELEGRAM_CHAT_ID");
-  const gcid = Netlify.env.get("GOOGLE_CLIENT_ID");
-  const gcs = Netlify.env.get("GOOGLE_CLIENT_SECRET");
-  const grt = Netlify.env.get("GOOGLE_REFRESH_TOKEN");
-  const elKey = Netlify.env.get("ELEVENLABS_API_KEY");
-  const elVoice = Netlify.env.get("ELEVENLABS_VOICE_ID") || "onwK4e9ZLuTAKqWW03F9";
-  const mapsKey = Netlify.env.get("GOOGLE_MAPS_KEY");
-  if (!tok || !key) return new Response("OK");
+const axios = require('axios');
 
-  // Send plain text message
-  const send = async (c, t) => {
-    await fetch("https://api.telegram.org/bot"+tok+"/sendMessage", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({chat_id:c, text:t.slice(0,4096), disable_web_page_preview:true})
-    });
-  };
+// Telegram Bot Configuration
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-  // Send text + voice message (used for Claude conversation replies only)
-  const speakAndSend = async (c, t) => {
-    await send(c, t);
-    if (!elKey) return;
-    try {
-      const stripped = t
-        .replace(/\*\*([^*]+)\*\*/g, "$1")
-        .replace(/\*([^*]+)\*/g, "$1")
-        .replace(/`([^`]+)`/g, "$1")
-        .replace(/#{1,6}\s/g, "")
-        .slice(0, 5000);
-      const elRes = await fetch(
-        `https://api.elevenlabs.io/v1/text-to-speech/${elVoice}/stream`,
-        {
-          method: "POST",
-          headers: { "xi-api-key": elKey, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text: stripped,
-            model_id: "eleven_flash_v2_5",
-            voice_settings: { stability: 0.5, similarity_boost: 0.75 },
-          }),
-        }
-      );
-      if (!elRes.ok) { console.error("ElevenLabs error:", elRes.status, await elRes.text()); return; }
-      const audioBuffer = await elRes.arrayBuffer();
-      const formData = new FormData();
-      formData.append("chat_id", c);
-      formData.append("voice", new Blob([audioBuffer], { type: "audio/mpeg" }), "jarvis.mp3");
-      await fetch(`https://api.telegram.org/bot${tok}/sendVoice`, { method: "POST", body: formData });
-    } catch (err) {
-      console.error("Voice error (non-fatal):", err.message);
-    }
-  };
+// Email importance scoring criteria
+const VIP_SENDERS = [
+  'bgv', 'bethnal green ventures',
+  'ed shaw', 'john barter',
+  'akee', 'meta',
+  'lucy heard', 'stillmovingmedia',
+  'vouchsafe', 'anna', 'vivian', 'fitterstock'
+];
 
-  let body; try { body = await req.json(); } catch(e) { return new Response("OK"); }
-  const msg = body?.message || body?.edited_message;
-  if (!msg) return new Response("OK");
-  const cid = String(msg.chat?.id);
-  const txt = msg.text?.trim();
-  if (aid && cid !== String(aid)) return new Response("OK");
-  if (!txt && !msg.photo && !msg.document) return new Response("OK");
-  if (txt === "/start") { await send(cid, "Jarvis online."); return new Response("OK"); }
+const URGENT_KEYWORDS = [
+  'urgent', 'important', 'action required', 'deadline',
+  'sha', 'shareholder', 'investor', 'investment',
+  'verification', 'verify', 'confirm',
+  'meeting', 'call', 'schedule',
+  'introduction', 'intro', 'connect'
+];
 
-  // Google token
-  const getGToken = async () => {
-    if (!gcid||!gcs||!grt) return null;
-    try {
-      const r = await fetch("https://oauth2.googleapis.com/token", {
-        method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
-        body: new URLSearchParams({client_id:gcid,client_secret:gcs,refresh_token:grt,grant_type:"refresh_token"})
-      });
-      return (await r.json()).access_token||null;
-    } catch(e) { return null; }
-  };
+const CONTEXT_KEYWORDS = [
+  'day2', 'parkinsons', 'parkinson',
+  'nhs', 'health', 'bgv', 'accelerator',
+  'pitch', 'deck', 'funding'
+];
 
-  // Download file from Telegram
-  const getTelegramFile = async (fileId) => {
-    const r = await fetch(`https://api.telegram.org/bot${tok}/getFile?file_id=${fileId}`);
-    const d = await r.json();
-    if (!d.ok) return null;
-    const filePath = d.result.file_path;
-    const fileRes = await fetch(`https://api.telegram.org/file/bot${tok}/${filePath}`);
-    const buffer = await fileRes.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-    return {
-      base64: btoa(binary),
-      mimeType: filePath.endsWith('.pdf') ? 'application/pdf' : filePath.endsWith('.png') ? 'image/png' : 'image/jpeg',
-      isImage: !filePath.endsWith('.pdf')
-    };
-  };
+const TIME_SENSITIVE = [
+  'today', 'tomorrow', 'asap',
+  'waiting', 'reminder', 'follow up',
+  'expiring', 'expire', 'due'
+];
 
-  // Calendar
-  const getCalendar = async (gt, hours=24) => {
-    if (!gt) return "Calendar unavailable";
-    const now = new Date(), end = new Date(now.getTime()+hours*3600000);
-    const r = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${now.toISOString()}&timeMax=${end.toISOString()}&singleEvents=true&orderBy=startTime&maxResults=15`,{headers:{Authorization:"Bearer "+gt}});
-    const d = await r.json();
-    if (!d.items?.length) return "No events";
-    return d.items.map(e=>{
-      const dt=e.start?.dateTime||e.start?.date||"";
-      const t=dt.includes("T")?new Date(dt).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",timeZone:"Europe/London"}):"All day";
-      return `${t} — ${e.summary||"Untitled"}`;
-    }).join("\n");
-  };
+const PUSH_SCORE_THRESHOLD = 7;
+const PUSH_AGE_THRESHOLD_HOURS = 2;
 
-  const createEvent = async (gt,title,startISO,endISO,attendees=[]) => {
-    if (!gt) return "Calendar unavailable";
-    const ev={summary:title,start:{dateTime:startISO,timeZone:"Europe/London"},end:{dateTime:endISO,timeZone:"Europe/London"}};
-    if (attendees.length) ev.attendees=attendees.map(e=>({email:e}));
-    const r=await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events?sendUpdates=all",{method:"POST",headers:{Authorization:"Bearer "+gt,"Content-Type":"application/json"},body:JSON.stringify(ev)});
-    const d=await r.json();
-    return d.id?`Added: ${title}`:`Failed: ${d.error?.message||"unknown"}`;
-  };
-
-  // Gmail
-  const getEmails = async (gt) => {
-    if (!gt) return "Gmail unavailable";
-    const r=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent("in:inbox -category:promotions -category:social -from:noreply -from:no-reply")}&maxResults=6`,{headers:{Authorization:"Bearer "+gt}});
-    const d=await r.json();
-    if (!d.messages?.length) return "Inbox clear";
-    const emails=await Promise.all(d.messages.slice(0,6).map(async m=>{
-      const mr=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`,{headers:{Authorization:"Bearer "+gt}});
-      const md=await mr.json(); const h={};
-      for(const hh of(md.payload?.headers||[]))h[hh.name]=hh.value;
-      return `• ${(h.From||"?").replace(/<.*>/,"").trim().replace(/"/g,"")}: ${h.Subject||"No subject"}`;
-    }));
-    return emails.join("\n");
-  };
-
-  const sendEmail = async (gt,to,subject,bodyText) => {
-    if (!gt) return "Gmail unavailable";
-    try {
-      const mime=`To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${bodyText}`;
-      const raw=btoa(unescape(encodeURIComponent(mime))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=/g,"");
-      const r=await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send",{method:"POST",headers:{Authorization:"Bearer "+gt,"Content-Type":"application/json"},body:JSON.stringify({raw})});
-      const d=await r.json();
-      return d.id?`Sent to ${to}`:`Failed: ${d.error?.message||JSON.stringify(d)}`;
-    } catch(e){return `Error: ${e.message}`;}
-  };
-
-  // Drive
-  const searchDrive = async (gt,query) => {
-    if (!gt) return "Drive unavailable";
-    const r=await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(`fullText contains '${query}' and trashed=false`)}&fields=files(id,name,webViewLink)&pageSize=5&orderBy=modifiedTime desc`,{headers:{Authorization:"Bearer "+gt}});
-    const d=await r.json();
-    if (!d.files?.length) return `No files found for "${query}"`;
-    return d.files.map(f=>`${f.name}\n${f.webViewLink}`).join("\n\n");
-  };
-
-  // Google Docs
-  const createDoc = async (gt,title,content) => {
-    if (!gt) return {error:"No token"};
-    try {
-      const r=await fetch("https://docs.googleapis.com/v1/documents",{method:"POST",headers:{Authorization:"Bearer "+gt,"Content-Type":"application/json"},body:JSON.stringify({title})});
-      const d=await r.json();
-      if (!d.documentId) return {error:d.error?.message||"Failed"};
-      if (content) await fetch(`https://docs.googleapis.com/v1/documents/${d.documentId}:batchUpdate`,{method:"POST",headers:{Authorization:"Bearer "+gt,"Content-Type":"application/json"},body:JSON.stringify({requests:[{insertText:{location:{index:1},text:content}}]})});
-      return {docUrl:`https://docs.google.com/document/d/${d.documentId}/edit`,title};
-    } catch(e){return {error:e.message};}
-  };
-
-  // ── GOOGLE MAPS ────────────────────────────────────────────────────────────
-  const HOME_LOCATION = 'Northleach, Cotswolds, GL54 3JH, UK';
-
-  const isMapsQuery = (t) => {
-    const l = t.toLowerCase();
-    return (
-      /how long (to|does it take|will it take)|travel time|drive to|get to|eta to/.test(l) ||
-      /how far (is|to)|distance to/.test(l) ||
-      /directions? (to|from)|route to|how do i get to|navigate to/.test(l) ||
-      /near(by| me| here)|(closest|nearest)\s/.test(l) ||
-      /find (a |an |the )?(pub|petrol|garage|restaurant|cafe|coffee|hotel|pharmacy|hospital|vet|supermarket|shop|station|gym|park|school)/.test(l)
-    );
-  };
-
-  const handleMapsQuery = async (t) => {
-    if (!mapsKey) return "Google Maps not configured. Add GOOGLE_MAPS_KEY to Netlify env vars.";
-
-    // Use Claude to extract structured intent
-    const extractRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 200,
-        system: `Extract location intent from a query. Respond ONLY with raw JSON — no markdown, no backticks.
-Matt lives in Northleach, Cotswolds GL54. Use as origin if none specified.
-Return exactly: {"intent":"travel_time"|"directions"|"nearby","origin":"...","destination":"...","search_query":"..."}
-For nearby: search_query = what to search for (e.g. "petrol station", "pub"). Leave unused fields null.`,
-        messages: [{ role: 'user', content: t }]
-      })
-    });
-    const extractData = await extractRes.json();
-    let parsed;
-    try { parsed = JSON.parse(extractData.content[0].text.trim()); }
-    catch(e) { return "Couldn't understand that Maps request."; }
-
-    if (parsed.intent === 'nearby') {
-      const loc = parsed.origin || HOME_LOCATION;
-      // Geocode location first
-      const geoRes = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(loc)}&key=${mapsKey}`);
-      const geoData = await geoRes.json();
-      if (geoData.status !== 'OK') return `Couldn't locate "${loc}".`;
-      const { lat, lng } = geoData.results[0].geometry.location;
-      // Text search nearby
-      const searchRes = await fetch(`https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(parsed.search_query)}&location=${lat},${lng}&radius=10000&key=${mapsKey}`);
-      const searchData = await searchRes.json();
-      const places = (searchData.results || []).slice(0, 5);
-      if (!places.length) return `No ${parsed.search_query} found nearby.`;
-      let reply = `Nearest ${parsed.search_query}:\n\n`;
-      places.forEach((p, i) => {
-        reply += `${i+1}. ${p.name}\n   ${p.formatted_address}`;
-        if (p.rating) reply += `\n   ⭐ ${p.rating}/5`;
-        if (p.opening_hours?.open_now !== undefined) reply += `  ${p.opening_hours.open_now ? '🟢 Open' : '🔴 Closed'}`;
-        reply += '\n\n';
-      });
-      reply += `🗺 https://www.google.com/maps/search/${encodeURIComponent(parsed.search_query + ' near ' + loc)}`;
-      return reply;
-
-    } else if (parsed.intent === 'directions') {
-      const origin = encodeURIComponent(parsed.origin || HOME_LOCATION);
-      const dest = encodeURIComponent(parsed.destination);
-      const res = await fetch(`https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${dest}&mode=driving&key=${mapsKey}`);
-      const data = await res.json();
-      if (data.status !== 'OK') return `Couldn't get directions to ${parsed.destination}.`;
-      const leg = data.routes[0].legs[0];
-      const steps = leg.steps.slice(0, 8).map((s, i) => {
-        const instr = s.html_instructions.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-        return `${i+1}. ${instr} (${s.distance.text})`;
-      });
-      let reply = `🗺 ${leg.start_address} → ${leg.end_address}\n`;
-      reply += `📏 ${leg.distance.text}  ⏱ ${leg.duration.text}\n\n`;
-      reply += steps.join('\n');
-      reply += `\n\n🗺 https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(parsed.origin||HOME_LOCATION)}&destination=${encodeURIComponent(parsed.destination)}&travelmode=driving`;
-      return reply;
-
-    } else {
-      // travel_time / ETA
-      const origin = encodeURIComponent(parsed.origin || HOME_LOCATION);
-      const dest = encodeURIComponent(parsed.destination);
-      const res = await fetch(`https://maps.googleapis.com/maps/api/distancematrix/json?origins=${origin}&destinations=${dest}&mode=driving&departure_time=now&key=${mapsKey}`);
-      const data = await res.json();
-      if (data.status !== 'OK') return `Couldn't calculate travel time to ${parsed.destination}.`;
-      const el = data.rows[0]?.elements[0];
-      if (!el || el.status !== 'OK') return `No route found to ${parsed.destination}.`;
-      let reply = `🗺 ${data.origin_addresses[0]} → ${data.destination_addresses[0]}\n\n`;
-      reply += `⏱ ${el.duration.text}`;
-      if (el.duration_in_traffic?.text && el.duration_in_traffic.text !== el.duration.text)
-        reply += ` (${el.duration_in_traffic.text} with current traffic)`;
-      reply += `\n📏 ${el.distance.text}`;
-      reply += `\n\n🗺 https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(parsed.origin||HOME_LOCATION)}&destination=${encodeURIComponent(parsed.destination)}&travelmode=driving`;
-      return reply;
-    }
-  };
-  // ── END GOOGLE MAPS ────────────────────────────────────────────────────────
-
-  // Memory via Netlify Blobs
-  const { getStore } = await import("@netlify/blobs");
-  const store = getStore("jarvis");
-  const loadMem = async () => {try{return(await store.get("memory",{type:"json"}))||{items:[]};}catch(e){return{items:[]};}};
-  const saveMem = async (m) => {try{await store.setJSON("memory",m);}catch(e){}};
-  const loadPending = async () => {try{return await store.get("pending-"+cid,{type:"json"});}catch(e){return null;}};
-  const savePending = async (p) => {try{if(p)await store.setJSON("pending-"+cid,p);else await store.delete("pending-"+cid);}catch(e){}};
-  const loadHist = async () => {try{return((await store.get("hist-"+cid,{type:"json"}))||{t:[]}).t;}catch(e){return[];}};
-  const saveHist = async (t) => {try{await store.setJSON("hist-"+cid,{t:t.slice(-10)});}catch(e){}};
-
-  // Handle photo messages
-  if (msg.photo || msg.document) {
-    const fileId = msg.photo ? msg.photo[msg.photo.length-1].file_id : msg.document.file_id;
-    const caption = msg.caption || (msg.photo ? "What's in this image?" : "Summarise this document");
-    try {
-      const file = await getTelegramFile(fileId);
-      if (!file) { await send(cid, "Could not download the file."); return new Response("OK"); }
-      const [m, hist] = await Promise.all([loadMem(), loadHist()]);
-      const today = new Date().toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
-      const system = `You are Jarvis, Matt's personal AI on Telegram. Sharp, warm, efficient. Plain text only. Today: ${today}. ${m.items?.length?"Memory:\n"+m.items.map(i=>"- "+i).join("\n"):""}`;
-      const content = file.isImage
-        ? [{type:"image",source:{type:"base64",media_type:file.mimeType,data:file.base64}},{type:"text",text:caption}]
-        : [{type:"document",source:{type:"base64",media_type:"application/pdf",data:file.base64}},{type:"text",text:caption}];
-      const r = await fetch("https://api.anthropic.com/v1/messages",{
-        method:"POST",
-        headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},
-        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1024,system,messages:[...hist.flatMap(t=>[{role:"user",content:t.u},{role:"assistant",content:t.a}]),{role:"user",content}]})
-      });
-      const d = await r.json();
-      const reply = clean(d.content?.[0]?.text || "Could not process the file.");
-      await saveHist([...hist,{u:"[sent a file: "+caption+"]",a:reply.substring(0,800)}]);
-      await send(cid, reply);
-    } catch(err) { await send(cid, "Error processing file: "+err.message?.slice(0,100)); }
-    return new Response("OK");
+// Email scoring logic
+function scoreEmail(email) {
+  let score = 0;
+  const reasons = [];
+  
+  const from = (email.headers?.From || '').toLowerCase();
+  const subject = (email.headers?.Subject || '').toLowerCase();
+  const snippet = (email.snippet || '').toLowerCase();
+  const labels = email.labelIds || [];
+  
+  if (labels.includes('IMPORTANT')) {
+    score += 3;
+    reasons.push('Gmail important');
   }
-
-  const lower = txt.toLowerCase().trim();
-  const yesWords = ["yes","yeah","yep","send it","do it","go ahead","confirm","ok","sure","send","create it","create","add it","y","sent","correct","go","proceed","do this","that's right","right","approved"];
-  const YES = yesWords.includes(lower) || lower.startsWith("yes") || lower.startsWith("y ");
-  const NO = ["no","cancel","nope","stop","abort"].includes(lower);
-
-  // Pending confirmation
-  const pending = await loadPending();
-  if (pending) {
-    if (YES) {
-      await savePending(null);
-      const gt = await getGToken();
-      if (pending.type==="email") await send(cid, await sendEmail(gt,pending.to,pending.subject,pending.body));
-      else if (pending.type==="event") await send(cid, await createEvent(gt,pending.title,pending.start,pending.end,pending.attendees||[]));
-      else if (pending.type==="doc") {
-        const res=await createDoc(gt,pending.title,pending.content||"");
-        await send(cid,res.error?`Failed: ${res.error}`:`Created: ${res.title}\n\n${res.docUrl}`);
-      }
-      return new Response("OK");
-    }
-    if (NO){await savePending(null);await send(cid,"Cancelled.");return new Response("OK");}
+  
+  if (VIP_SENDERS.some(vip => from.includes(vip))) {
+    score += 3;
+    reasons.push('VIP sender');
   }
-
-  // Memory commands
-  if(["memory","show memory","what do you remember"].includes(lower)){
-    const m=await loadMem();
-    if(!m.items?.length){await send(cid,"Nothing saved yet. Try: remember Ed Shaw is Day2 co-founder");return new Response("OK");}
-    await send(cid,"Jarvis Memory:\n\n"+m.items.map((x,i)=>`${i+1}. ${x}`).join("\n"));return new Response("OK");
+  
+  if (URGENT_KEYWORDS.some(kw => subject.includes(kw))) {
+    score += 2;
+    reasons.push('Urgent language');
   }
-  const rem=txt.match(/^remember[:\s]+(.+)$/is);
-  if(rem){const fact=rem[1].trim();const m=await loadMem();m.items=[...(m.items||[]).filter(i=>i!==fact),fact].slice(-50);await saveMem(m);await send(cid,`Saved. ${m.items.length} item(s) in memory.`);return new Response("OK");}
-  const fgt=txt.match(/^forget[:\s]+(.+)$/i);
-  if(fgt){const term=fgt[1].trim().toLowerCase();const m=await loadMem();m.items=(m.items||[]).filter(i=>!i.toLowerCase().includes(term));await saveMem(m);await send(cid,`Forgotten: ${fgt[1].trim()}`);return new Response("OK");}
-
-  // Direct commands
-  if(["calendar","today","what's on today","my calendar"].includes(lower)){const gt=await getGToken();await send(cid,"Today:\n\n"+await getCalendar(gt,24));return new Response("OK");}
-  if(["tomorrow","what's on tomorrow"].includes(lower)){const gt=await getGToken();await send(cid,"Tomorrow:\n\n"+await getCalendar(gt,48));return new Response("OK");}
-  if(["emails","inbox","check emails","check my emails"].includes(lower)){const gt=await getGToken();await send(cid,"Inbox:\n\n"+await getEmails(gt));return new Response("OK");}
-  if(lower==="clear history"){await saveHist([]);await send(cid,"History cleared.");return new Response("OK");}
-
-  // Train command
-  if(["next train","trains","train times","next train to london","trains to london","trains to paddington","kingham to paddington"].some(p => lower.includes(p))){
-    const appId = Netlify.env.get("TRANSPORT_APP_ID");
-    const appKey = Netlify.env.get("TRANSPORT_APP_KEY");
-    try {
-      const url = `https://transportapi.com/v3/uk/train/station/KGM/live.json?app_id=${appId}&app_key=${appKey}&calling_at=PAD&type=departure`;
-      const r = await fetch(url);
-      const d = await r.json();
-      const services = d.departures?.all || [];
-      if(!services.length){ await send(cid, "No trains from Kingham to Paddington right now."); return new Response("OK"); }
-      const lines = services.slice(0,4).map(s => {
-        const time = s.aimed_departure_time || s.expected_departure_time || "?";
-        const expected = s.expected_departure_time && s.expected_departure_time !== s.aimed_departure_time ? ` (exp ${s.expected_departure_time})` : "";
-        const status = s.status === "ON TIME" ? "✅ On time" : s.status === "CANCELLED" ? "❌ Cancelled" : `⚠️ ${s.status}`;
-        const platform = s.platform ? ` · Plat ${s.platform}` : "";
-        return `🚂 ${time}${expected} → Paddington · ${status}${platform} · ${s.operator_name||""}`;
-      });
-      await send(cid, `Kingham → Paddington\n\n${lines.join("\n")}`);
-    } catch(e) { await send(cid, "Could not fetch train times: " + e.message); }
-    return new Response("OK");
+  
+  if (CONTEXT_KEYWORDS.some(kw => subject.includes(kw) || snippet.includes(kw))) {
+    score += 2;
+    reasons.push('Day2-related');
   }
-
-  // Food ordering
-  if(lower.startsWith("order food") || lower.startsWith("order kfc") || lower.startsWith("order burger") || lower.startsWith("order mcd") || lower.startsWith("order gdk")){
-    const FOOD_URL = Netlify.env.get("FOOD_SERVER_URL") || "";
-    if(!FOOD_URL){ await send(cid, "Food server URL not configured."); return new Response("OK"); }
-    const restaurants = ["burger king","mcdonalds","mcdonald's","kfc","gdk"];
-    let restaurant = "kfc", item = "Bargain Bucket: 6 pc";
-    const orderBody = txt.replace(/^order\s+food\s*/i,"").trim();
-    for(const res of restaurants){
-      if(orderBody.toLowerCase().startsWith(res)){ restaurant=res; item=orderBody.slice(res.length).trim()||item; break; }
-    }
-    try {
-      const r = await fetch(FOOD_URL, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({restaurant,item}) });
-      const d = await r.json();
-      await send(cid, "🍔 Order started!\n\nRestaurant: "+d.restaurant+"\nItem: "+d.item+"\n\nChrome is opening Uber Eats. Check your Mac — it stops at checkout for you to confirm.");
-    } catch(e) { await send(cid, "Could not reach your Mac. Make sure jarvis_food_server.py and Chrome are running. Error: "+e.message); }
-    return new Response("OK");
+  
+  if (TIME_SENSITIVE.some(kw => subject.includes(kw) || snippet.includes(kw))) {
+    score += 2;
+    reasons.push('Time-sensitive');
   }
-
-  // Briefing
-  if(["briefing","brief me","morning briefing","daily briefing","give me a briefing"].includes(lower)){
-    const gt=await getGToken();
-    const [cal,inbox]=await Promise.all([getCalendar(gt,24),getEmails(gt)]);
-    await send(cid,"Calendar:\n\n"+cal+"\n\nInbox:\n\n"+inbox);
-    return new Response("OK");
+  
+  if (labels.includes('INBOX')) {
+    score += 1;
+    reasons.push('Primary inbox');
   }
-
-  // ── MAPS ROUTING — before Claude chat ──────────────────────────────────────
-  if (isMapsQuery(txt)) {
-    try {
-      const mapsReply = await handleMapsQuery(txt);
-      await speakAndSend(cid, mapsReply);
-    } catch(e) {
-      await send(cid, "Maps error: " + e.message);
-    }
-    return new Response("OK");
+  
+  if (labels.includes('CATEGORY_PROMOTIONS')) {
+    score -= 2;
   }
-  // ── END MAPS ROUTING ───────────────────────────────────────────────────────
+  
+  return {
+    score: Math.max(0, Math.min(10, score)),
+    reasons
+  };
+}
 
-  // Claude chat
+// Check for important emails
+async function checkImportantEmails() {
   try {
-    const [m, hist, gt] = await Promise.all([loadMem(), loadHist(), getGToken()]);
-    const today = new Date().toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
-    const system = `You are Jarvis, Matt's personal AI on Telegram. Sharp, warm, efficient. Plain text only — no markdown, no asterisks, no bold.
+    const response = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        messages: [{
+          role: 'user',
+          content: 'Call Gmail:gmail_search_messages with q="is:unread" and maxResults=50. Return ONLY raw JSON with no preamble.'
+        }]
+      },
+      {
+        headers: {
+          'x-api-key': ANTHROPIC_API_KEY,
+          'content-type': 'application/json',
+          'anthropic-version': '2023-06-01'
+        }
+      }
+    );
 
-Matt Ross — CEO Day2Health, Parkinson's platform. BGV accelerator. Northleach Cotswolds. Ex-Google/YouTube.
-Today: ${today}
-${m.items?.length?"IMPORTANT MEMORY — always apply these in conversation:\n"+m.items.map(i=>"- "+i).join("\n"):""}
-
-You can take real actions: send emails, create calendar events, create Google Docs, search Drive.
-When asked, show details and ask confirmation. Then output the action on the LAST LINE ONLY (nothing after it):
-SEND_EMAIL|to@email.com|Subject|Body
-CREATE_EVENT|Title|2026-03-20T14:00:00|2026-03-20T15:00:00|optional@attendee.com
-CREATE_DOC|Document title|Optional content
-SEARCH_DRIVE|search terms
-
-Use web search for current info: news, weather, sports, research. Be concise.
-
-LOCAL RESTAURANT BOOKINGS — Matt's locals, book by email on his behalf:
-- Sherbourne Arms, Northleach: info@thesherbornenorthleach.com
-- The Wheatsheaf, Northleach: bookings.wheatsheafinn@youngs.co.uk
-- The Stump, nr Cirencester: phone only — 01285 720288, tell Matt to call.
-When asked to book a table, if date/time/party size not given ask for them first. Then draft a short warm email: "Hi, I'd like to book a table for [X] on [date] at [time]. Many thanks, Matt Ross." Ask confirmation before sending.`;
-
-    const messages=[...hist.flatMap(t=>[{role:"user",content:t.u},{role:"assistant",content:t.a}]),{role:"user",content:txt}];
-    const r=await fetch("https://api.anthropic.com/v1/messages",{
-      method:"POST",
-      headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},
-      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1024,system,messages,tools:[{type:"web_search_20250305",name:"web_search"}]})
-    });
-    const d=await r.json();
-    let reply = (d.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"No response").trim();
-    if (!reply && d.stop_reason === "tool_use") {
-      const toolResults = d.content.filter(b=>b.type==="tool_use").map(b=>({type:"tool_result",tool_use_id:b.id,content:"Search completed"}));
-      const r2=await fetch("https://api.anthropic.com/v1/messages",{
-        method:"POST",
-        headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},
-        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1024,system,messages:[...messages,{role:"assistant",content:d.content},{role:"user",content:toolResults}]})
-      });
-      const d2=await r2.json();
-      reply=(d2.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"No response").trim();
+    // Extract emails from Claude response
+    const textBlock = response.data.content.find(b => b.type === 'text');
+    if (!textBlock) return [];
+    
+    const gmailData = JSON.parse(textBlock.text);
+    const emails = gmailData.messages || [];
+    
+    const importantEmails = [];
+    const now = Date.now();
+    
+    for (const email of emails) {
+      const ageHours = (now - parseInt(email.internalDate)) / (1000 * 60 * 60);
+      const { score, reasons } = scoreEmail(email);
+      
+      if (score >= PUSH_SCORE_THRESHOLD && ageHours >= PUSH_AGE_THRESHOLD_HOURS) {
+        importantEmails.push({
+          from: email.headers?.From || 'Unknown',
+          subject: email.headers?.Subject || '(No subject)',
+          snippet: email.snippet?.substring(0, 150),
+          score,
+          reasons,
+          ageHours: ageHours.toFixed(1)
+        });
+      }
     }
-    const lines=reply.split("\n");
-    const last=lines[lines.length-1].trim();
-    const visible=lines.slice(0,-1).join("\n").trim();
-    if(last.startsWith("SEND_EMAIL|")){
-      const p=last.split("|");
-      await savePending({type:"email",to:p[1]?.trim(),subject:p[2]?.trim(),body:p.slice(3).join("|").trim()});
-      await speakAndSend(cid,clean(visible||`Ready to send to ${p[1]?.trim()}. Shall I send this?`));
-    } else if(last.startsWith("CREATE_EVENT|")){
-      const p=last.split("|");
-      await savePending({type:"event",title:p[1]?.trim(),start:p[2]?.trim(),end:p[3]?.trim(),attendees:p[4]?p[4].split(",").map(e=>e.trim()):[]});
-      await speakAndSend(cid,visible||`Ready to create: ${p[1]?.trim()}. Shall I add this?`);
-    } else if(last.startsWith("CREATE_DOC|")){
-      const p=last.split("|");
-      await savePending({type:"doc",title:p[1]?.trim(),content:p.slice(2).join("|").trim()});
-      await speakAndSend(cid,visible||`Ready to create Google Doc: "${p[1]?.trim()}". Shall I create it?`);
-    } else if(last.startsWith("SEARCH_DRIVE|")){
-      const results=await searchDrive(gt,last.replace("SEARCH_DRIVE|","").trim());
-      await saveHist([...hist,{u:txt.substring(0,400),a:reply.substring(0,800)}]);
-      await send(cid,(visible?visible+"\n\n":"")+results);
-    } else {
-      await saveHist([...hist,{u:txt.substring(0,400),a:reply.substring(0,800)}]);
-      await speakAndSend(cid,clean(reply));
+    
+    return importantEmails;
+  } catch (error) {
+    console.error('Email check failed:', error);
+    return [];
+  }
+}
+
+// Send message to Telegram
+async function sendToTelegram(message) {
+  try {
+    await axios.post(
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+      {
+        chat_id: TELEGRAM_CHAT_ID,
+        text: message,
+        parse_mode: 'Markdown'
+      }
+    );
+    return true;
+  } catch (error) {
+    console.error('Telegram send failed:', error);
+    return false;
+  }
+}
+
+// Main handler
+exports.handler = async (event) => {
+  // Handle OPTIONS preflight
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 200,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS'
+      },
+      body: ''
+    };
+  }
+
+  // Only accept POST
+  if (event.httpMethod !== 'POST') {
+    return {
+      statusCode: 405,
+      body: JSON.stringify({ error: 'Method not allowed' })
+    };
+  }
+
+  try {
+    const { message, command } = JSON.parse(event.body);
+
+    // Handle email check command
+    if (command === 'check_emails') {
+      const importantEmails = await checkImportantEmails();
+      
+      if (importantEmails.length === 0) {
+        await sendToTelegram('✅ No important unread emails');
+      } else {
+        let msg = `🚨 *${importantEmails.length} Important Email${importantEmails.length > 1 ? 's' : ''}*\n\n`;
+        
+        for (const email of importantEmails.slice(0, 5)) { // Max 5 at a time
+          msg += `*[${email.score}/10]* ${email.from}\n`;
+          msg += `*Subject:* ${email.subject}\n`;
+          msg += `${email.snippet}...\n`;
+          msg += `_${email.reasons.join(', ')} • ${email.ageHours}h old_\n\n`;
+        }
+        
+        if (importantEmails.length > 5) {
+          msg += `_...and ${importantEmails.length - 5} more_`;
+        }
+        
+        await sendToTelegram(msg);
+      }
+      
+      return {
+        statusCode: 200,
+        body: JSON.stringify({ success: true, count: importantEmails.length })
+      };
     }
-  } catch(err){await send(cid,"ERROR: "+err.message?.slice(0,200));}
-  return new Response("OK");
+
+    // Handle regular message send
+    if (message) {
+      await sendToTelegram(message);
+      
+      return {
+        statusCode: 200,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ success: true })
+      };
+    }
+
+    return {
+      statusCode: 400,
+      body: JSON.stringify({ error: 'No message or command provided' })
+    };
+
+  } catch (error) {
+    console.error('Handler error:', error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: error.message })
+    };
+  }
 };
-
-function clean(t){return t.replace(/\*\*([^*]+)\*\*/g,"$1").replace(/\*([^*]+)\*/g,"$1").replace(/`([^`]+)`/g,"$1");}
-
-export const config = { path: "/telegram" };
