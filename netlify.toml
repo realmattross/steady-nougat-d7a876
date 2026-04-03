@@ -8,3 +8,6 @@
 
 [functions."telegram"]
   timeout = 30
+
+[functions."spotify-callback"]
+  timeout = 10
