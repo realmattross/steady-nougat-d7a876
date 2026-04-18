@@ -332,6 +332,7 @@ if (!elRes.ok) {
   }
 
   const lower = txt.toLowerCase().trim();
+  console.log("[jarvis] incoming:", JSON.stringify(txt), "→ lower:", JSON.stringify(lower));
   const yesWords = ["yes","yeah","yep","send it","do it","go ahead","confirm","ok","sure","send","create it","create","add it","y","sent","correct","go","proceed","do this","that's right","right","approved"];
   const YES = yesWords.includes(lower) || lower.startsWith("yes") || lower.startsWith("y ");
   const NO = ["no","cancel","nope","stop","abort"].includes(lower);
@@ -365,7 +366,7 @@ if (!elRes.ok) {
   if(fgt){const term=fgt[1].trim().toLowerCase();const m=await loadMem();m.items=(m.items||[]).filter(i=>!i.toLowerCase().includes(term));await saveMem(m);await send(cid,`Forgotten: ${fgt[1].trim()}`);return new Response("OK");}
 
   // Direct commands (text only — no voice for quick lookups)
-  if(["calendar","today","what's on today","my calendar"].includes(lower)){const gt=await getGToken();await send(cid,"Today:\n\n"+await getCalendar(gt,24));return new Response("OK");}
+  if(["calendar","today","what's on today","my calendar"].includes(lower)){console.log("[jarvis] calendar trigger hit");const gt=await getGToken();console.log("[jarvis] gt present?",!!gt,"err:",gTokenError);await send(cid,"Today:\n\n"+await getCalendar(gt,24));return new Response("OK");}
   if(["tomorrow","what's on tomorrow"].includes(lower)){const gt=await getGToken();await send(cid,"Tomorrow:\n\n"+await getCalendar(gt,48));return new Response("OK");}
   if(["emails","inbox","check emails","check my emails"].includes(lower)){const gt=await getGToken();await send(cid,"Inbox:\n\n"+await getEmails(gt));return new Response("OK");}
   if(lower==="clear history"){await saveHist([]);await send(cid,"History cleared.");return new Response("OK");}
