@@ -119,7 +119,12 @@ if (!elRes.ok) {
   const getCalendar = async (gt, hours=24) => {
     if (!gt) return gTokenError ? `Calendar unavailable — ${gTokenError}` : "Calendar unavailable";
     const now = new Date(), end = new Date(now.getTime()+hours*3600000);
-    const r = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${now.toISOString()}&timeMax=${end.toISOString()}&singleEvents=true&orderBy=startTime&maxResults=15`,{headers:{Authorization:"Bearer "+gt}});
+    return getCalendarRange(gt, now, end);
+  };
+
+  const getCalendarRange = async (gt, startDate, endDate) => {
+    if (!gt) return gTokenError ? `Calendar unavailable — ${gTokenError}` : "Calendar unavailable";
+    const r = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${startDate.toISOString()}&timeMax=${endDate.toISOString()}&singleEvents=true&orderBy=startTime&maxResults=15`,{headers:{Authorization:"Bearer "+gt}});
     const d = await r.json();
     if (!r.ok) return `Calendar error ${r.status}: ${d.error?.message||JSON.stringify(d).slice(0,200)}`;
     if (!d.items?.length) return "No events";
@@ -366,9 +371,33 @@ if (!elRes.ok) {
   if(fgt){const term=fgt[1].trim().toLowerCase();const m=await loadMem();m.items=(m.items||[]).filter(i=>!i.toLowerCase().includes(term));await saveMem(m);await send(cid,`Forgotten: ${fgt[1].trim()}`);return new Response("OK");}
 
   // Direct commands (text only — no voice for quick lookups)
-  if(["calendar","today","what's on today","my calendar"].includes(lower)){console.log("[jarvis] calendar trigger hit");const gt=await getGToken();console.log("[jarvis] gt present?",!!gt,"err:",gTokenError);await send(cid,"Today:\n\n"+await getCalendar(gt,24));return new Response("OK");}
-  if(["tomorrow","what's on tomorrow"].includes(lower)){const gt=await getGToken();await send(cid,"Tomorrow:\n\n"+await getCalendar(gt,48));return new Response("OK");}
-  if(["emails","inbox","check emails","check my emails"].includes(lower)){const gt=await getGToken();await send(cid,"Inbox:\n\n"+await getEmails(gt));return new Response("OK");}
+  // Calendar — natural language matchers
+  const calTomorrow = /\b(tomorrow|tmrw)\b/i;
+  const calDayOfWeek = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\b/i;
+  const calToday = /\b(calendar|schedule|agenda|diary|what'?s (on|up|scheduled|coming)|what (have i got|do i have|is on)|events? (today|for today)?|meetings? (today|for today)?|any (events|meetings))\b/i;
+  const inboxPat = /\b(inbox|check (my )?(emails?|mail|inbox|messages)|(any|new|recent|unread) (emails?|mail|messages?)|what'?s in (my )?(inbox|mail|email)|anything in (my )?(inbox|email|mail))\b/i;
+  const wantsCalendar = calToday.test(lower) || calTomorrow.test(lower) || (calDayOfWeek.test(lower) && !inboxPat.test(lower));
+  const wantsInbox = inboxPat.test(lower) && !calToday.test(lower) && !calTomorrow.test(lower);
+
+  // Day-of-week lookup (e.g. "what's on Monday")
+  if(calDayOfWeek.test(lower) && !inboxPat.test(lower) && !calTomorrow.test(lower)){
+    const dayMap={sun:0,sunday:0,mon:1,monday:1,tue:2,tues:2,tuesday:2,wed:3,wednesday:3,thu:4,thur:4,thurs:4,thursday:4,fri:5,friday:5,sat:6,saturday:6};
+    const match=lower.match(calDayOfWeek);
+    const targetDow=dayMap[match[1].toLowerCase()];
+    const now=new Date();
+    const daysAhead=((targetDow-now.getDay())+7)%7||7; // always look forward; same day = next week
+    const startOfDay=new Date(now.getFullYear(),now.getMonth(),now.getDate()+daysAhead,0,0,0);
+    const endOfDay=new Date(startOfDay.getTime()+24*3600000);
+    const gt=await getGToken();
+    const label=startOfDay.toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long"});
+    const events=await getCalendarRange(gt,startOfDay,endOfDay);
+    await send(cid,`${label}:\n\n${events}`);
+    return new Response("OK");
+  }
+
+  if(calTomorrow.test(lower)){const gt=await getGToken();await send(cid,"Tomorrow:\n\n"+await getCalendar(gt,48));return new Response("OK");}
+  if(wantsCalendar){console.log("[jarvis] calendar trigger hit");const gt=await getGToken();console.log("[jarvis] gt present?",!!gt,"err:",gTokenError);await send(cid,"Today:\n\n"+await getCalendar(gt,24));return new Response("OK");}
+  if(wantsInbox){const gt=await getGToken();await send(cid,"Inbox:\n\n"+await getEmails(gt));return new Response("OK");}
   if(lower==="clear history"){await saveHist([]);await send(cid,"History cleared.");return new Response("OK");}
   if(["briefing","brief me","morning briefing","daily briefing","give me a briefing"].includes(lower)){
     const gt=await getGToken();
