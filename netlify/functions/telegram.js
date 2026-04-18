@@ -81,15 +81,19 @@ if (!elRes.ok) {
   if (txt === "/start") { await send(cid, "Jarvis online."); return new Response("OK"); }
 
   // Google token
+  let gTokenError = null;
   const getGToken = async () => {
-    if (!gcid||!gcs||!grt) return null;
+    if (!gcid||!gcs||!grt) { gTokenError = "Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN env vars"; return null; }
     try {
       const r = await fetch("https://oauth2.googleapis.com/token", {
         method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
         body: new URLSearchParams({client_id:gcid,client_secret:gcs,refresh_token:grt,grant_type:"refresh_token"})
       });
-      return (await r.json()).access_token||null;
-    } catch(e) { return null; }
+      const d = await r.json();
+      if (d.access_token) { gTokenError = null; return d.access_token; }
+      gTokenError = `Google token refresh failed: ${d.error||"unknown"} — ${d.error_description||JSON.stringify(d)}`;
+      return null;
+    } catch(e) { gTokenError = `Google token fetch threw: ${e.message}`; return null; }
   };
 
   // Download file from Telegram
@@ -113,10 +117,11 @@ if (!elRes.ok) {
 
   // Calendar
   const getCalendar = async (gt, hours=24) => {
-    if (!gt) return "Calendar unavailable";
+    if (!gt) return gTokenError ? `Calendar unavailable — ${gTokenError}` : "Calendar unavailable";
     const now = new Date(), end = new Date(now.getTime()+hours*3600000);
     const r = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${now.toISOString()}&timeMax=${end.toISOString()}&singleEvents=true&orderBy=startTime&maxResults=15`,{headers:{Authorization:"Bearer "+gt}});
     const d = await r.json();
+    if (!r.ok) return `Calendar error ${r.status}: ${d.error?.message||JSON.stringify(d).slice(0,200)}`;
     if (!d.items?.length) return "No events";
     return d.items.map(e=>{
       const dt=e.start?.dateTime||e.start?.date||"";
@@ -136,9 +141,10 @@ if (!elRes.ok) {
 
   // Gmail
   const getEmails = async (gt) => {
-    if (!gt) return "Gmail unavailable";
+    if (!gt) return gTokenError ? `Gmail unavailable — ${gTokenError}` : "Gmail unavailable";
     const r=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent("in:inbox -category:promotions -category:social -from:noreply -from:no-reply")}&maxResults=6`,{headers:{Authorization:"Bearer "+gt}});
     const d=await r.json();
+    if (!r.ok) return `Gmail error ${r.status}: ${d.error?.message||JSON.stringify(d).slice(0,200)}`;
     if (!d.messages?.length) return "Inbox clear";
     const emails=await Promise.all(d.messages.slice(0,6).map(async m=>{
       const mr=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`,{headers:{Authorization:"Bearer "+gt}});
