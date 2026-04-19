@@ -12,6 +12,9 @@ export default async (req, context) => {
     const { audio } = await req.json();
     if (!audio) return new Response(JSON.stringify({ error: "No audio" }), { status: 400, headers: cors });
     const pcm = Uint8Array.from(atob(audio), c => c.charCodeAt(0));
+    if (pcm.length < 19200) {
+      return new Response(JSON.stringify({ transcript: "" }), { headers: { ...cors, "Content-Type": "application/json" } });
+    }
     const sampleRate = 16000, numChannels = 1, bitsPerSample = 16;
     const byteRate = sampleRate * numChannels * bitsPerSample / 8;
     const blockAlign = numChannels * bitsPerSample / 8;
