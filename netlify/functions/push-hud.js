@@ -32,7 +32,7 @@ export default async (req, context) => {
         const words = answer.split(' ');
         let line = '';
         for (const word of words) {
-          if ((line + ' ' + word).trim().length > 40) {
+          if ((line + ' ' + word).trim().length > 35) {
             if (line) lines.push(line.trim());
             line = word;
           } else {
@@ -41,7 +41,7 @@ export default async (req, context) => {
         }
         if (line) lines.push(line.trim());
       }
-      await store.setJSON("hud-latest", { lines: lines.slice(0, 6), ts: Date.now() });
+      await store.setJSON("hud-latest", { lines: lines.slice(0, 20), ts: Date.now() });
       return new Response(JSON.stringify({ ok: true }), {
         headers: { ...cors, "Content-Type": "application/json" }
       });
