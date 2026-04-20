@@ -18,7 +18,7 @@ export default async (req, context) => {
     }
 
     // Try both sample rates - send two requests and return whichever works
-    const tryTranscribe = async (sampleRate: number) => {
+    const tryTranscribe = async (sampleRate) => {
       const numChannels = 1, bitsPerSample = 16;
       const byteRate = sampleRate * numChannels * bitsPerSample / 8;
       const blockAlign = numChannels * bitsPerSample / 8;
