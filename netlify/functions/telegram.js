@@ -515,6 +515,21 @@ Use web search for current info: news, weather, sports, research. Be concise.`;
       await send(cid,(visible?visible+"\n\n":"")+result);
     } else {
       await saveHist([...hist,{u:txt.substring(0,400),a:reply.substring(0,800)}]);
+      try{
+        const {getStore}=await import("@netlify/blobs");
+        const store=getStore("jarvis-data");
+        const q=txt.slice(0,60);
+        const a=clean(reply).slice(0,1500);
+        const lines=["> "+q];
+        const words=a.split(" ");
+        let ln="";
+        for(const word of words){
+          if((ln+" "+word).trim().length>35){if(ln)lines.push(ln.trim());ln=word;}
+          else{ln=(ln+" "+word).trim();}
+        }
+        if(ln)lines.push(ln.trim());
+        await store.setJSON("hud-latest",{lines:lines.slice(0,20),ts:Date.now()});
+      }catch(hudErr){}
       await speakAndSend(cid,clean(reply));
     }
   } catch(err){await send(cid,"ERROR: "+err.message?.slice(0,200));}
