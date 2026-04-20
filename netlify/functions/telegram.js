@@ -511,7 +511,7 @@ Use web search for current info: news, weather, sports, research. Be concise.`;
       await send(cid,(visible?visible+"\n\n":"")+result);
     } else {
       await saveHist([...hist,{u:txt.substring(0,400),a:reply.substring(0,800)}]);
-      fetch("https://steady-nougat-d7a876.netlify.app/push-hud",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question:txt.slice(0,60),answer:clean(reply).slice(0,200)})}).catch(()=>{});
+      fetch("https://steady-nougat-d7a876.netlify.app/push-hud",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question:txt.slice(0,60),answer:clean(reply).slice(0,1500)})}).catch(()=>{});
       await speakAndSend(cid,clean(reply));
     }
   } catch(err){await send(cid,"ERROR: "+err.message?.slice(0,200));}
