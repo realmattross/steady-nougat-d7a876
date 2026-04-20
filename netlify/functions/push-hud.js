@@ -1,5 +1,3 @@
-import { getStore } from "@netlify/blobs";
-
 export default async (req, context) => {
   const cors = {
     "Access-Control-Allow-Origin": "*",
@@ -8,7 +6,7 @@ export default async (req, context) => {
   };
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
 
-  const store = getStore("jarvis-data");
+  const store = Netlify.blobs.getStore("jarvis-data");
 
   if (req.method === "GET") {
     try {
@@ -29,7 +27,6 @@ export default async (req, context) => {
       const lines = [];
       if (question) lines.push(`> ${question.slice(0, 60)}`);
       if (answer) {
-        // Word-wrap answer into ~40 char lines for HUD
         const words = answer.split(' ');
         let line = '';
         for (const word of words) {
