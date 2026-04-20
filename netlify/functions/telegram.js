@@ -376,11 +376,15 @@ if (!elRes.ok) {
   const calDayOfWeek = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\b/i;
   const calToday = /\b(calendar|schedule|agenda|diary|what'?s (on|up|scheduled|coming)|what (have i got|do i have|is on)|events? (today|for today)?|meetings? (today|for today)?|any (events|meetings))\b/i;
   const inboxPat = /\b(inbox|check (my )?(emails?|mail|inbox|messages)|(any|new|recent|unread) (emails?|mail|messages?)|what'?s in (my )?(inbox|mail|email)|anything in (my )?(inbox|email|mail))\b/i;
-  const wantsCalendar = calToday.test(lower) || calTomorrow.test(lower) || (calDayOfWeek.test(lower) && !inboxPat.test(lower));
-  const wantsInbox = inboxPat.test(lower) && !calToday.test(lower) && !calTomorrow.test(lower);
+  // Action-intent gate: if the message is asking Jarvis to DO something (create, send, etc.),
+  // skip read-only triggers and let the LLM parse it with full context.
+  const actionIntent = /\b(create|add|schedule|book|set up|set-up|setup|make|put|new|arrange|plan|invite|send|email|reply|respond|draft|write|compose|forward|remind|update|move|reschedule|change|cancel|delete|remove)\b/i;
+  const isAction = actionIntent.test(lower);
+  const wantsCalendar = !isAction && (calToday.test(lower) || calTomorrow.test(lower) || (calDayOfWeek.test(lower) && !inboxPat.test(lower)));
+  const wantsInbox = !isAction && inboxPat.test(lower) && !calToday.test(lower) && !calTomorrow.test(lower);
 
   // Day-of-week lookup (e.g. "what's on Monday")
-  if(calDayOfWeek.test(lower) && !inboxPat.test(lower) && !calTomorrow.test(lower)){
+  if(!isAction && calDayOfWeek.test(lower) && !inboxPat.test(lower) && !calTomorrow.test(lower)){
     const dayMap={sun:0,sunday:0,mon:1,monday:1,tue:2,tues:2,tuesday:2,wed:3,wednesday:3,thu:4,thur:4,thurs:4,thursday:4,fri:5,friday:5,sat:6,saturday:6};
     const match=lower.match(calDayOfWeek);
     const targetDow=dayMap[match[1].toLowerCase()];
@@ -395,7 +399,7 @@ if (!elRes.ok) {
     return new Response("OK");
   }
 
-  if(calTomorrow.test(lower)){const gt=await getGToken();await send(cid,"Tomorrow:\n\n"+await getCalendar(gt,48));return new Response("OK");}
+  if(!isAction && calTomorrow.test(lower)){const gt=await getGToken();await send(cid,"Tomorrow:\n\n"+await getCalendar(gt,48));return new Response("OK");}
   if(wantsCalendar){console.log("[jarvis] calendar trigger hit");const gt=await getGToken();console.log("[jarvis] gt present?",!!gt,"err:",gTokenError);await send(cid,"Today:\n\n"+await getCalendar(gt,24));return new Response("OK");}
   if(wantsInbox){const gt=await getGToken();await send(cid,"Inbox:\n\n"+await getEmails(gt));return new Response("OK");}
   if(lower==="clear history"){await saveHist([]);await send(cid,"History cleared.");return new Response("OK");}
@@ -511,8 +515,6 @@ Use web search for current info: news, weather, sports, research. Be concise.`;
       await send(cid,(visible?visible+"\n\n":"")+result);
     } else {
       await saveHist([...hist,{u:txt.substring(0,400),a:reply.substring(0,800)}]);
-      fetch("https://steady-nougat-d7a876.netlify.app/push-hud",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question:txt.slice(0,60),answer:clean(reply).slice(0,1500)})}).catch(()=>{});
-      await new Promise(r=>setTimeout(r,300));
       await speakAndSend(cid,clean(reply));
     }
   } catch(err){await send(cid,"ERROR: "+err.message?.slice(0,200));}
