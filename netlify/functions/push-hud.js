@@ -8,7 +8,7 @@ export default async (req, context) => {
   };
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
 
-  const store = getStore({ name: "jarvis-data", siteID: Netlify.env.get("SITE_ID"), token: Netlify.env.get("NETLIFY_TOKEN") });
+  const store = getStore("jarvis-data");
 
   if (req.method === "GET") {
     try {
