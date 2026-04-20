@@ -1,3 +1,5 @@
+import { getStore } from "@netlify/blobs";
+
 export default async (req, context) => {
   const cors = {
     "Access-Control-Allow-Origin": "*",
@@ -6,7 +8,7 @@ export default async (req, context) => {
   };
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
 
-  const store = Netlify.blobs.getStore("jarvis-data");
+  const store = getStore({ name: "jarvis-data", siteID: Netlify.env.get("SITE_ID"), token: Netlify.env.get("NETLIFY_TOKEN") });
 
   if (req.method === "GET") {
     try {
