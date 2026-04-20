@@ -11,11 +11,14 @@ export default async (req, context) => {
   try {
     const { audio } = await req.json();
     if (!audio) return new Response(JSON.stringify({ error: "No audio" }), { status: 400, headers: cors });
+
     const pcm = Uint8Array.from(atob(audio), c => c.charCodeAt(0));
-    if (pcm.length < 19200) {
+    if (pcm.length < 1000) {
       return new Response(JSON.stringify({ transcript: "" }), { headers: { ...cors, "Content-Type": "application/json" } });
     }
-    const sampleRate = 16000, numChannels = 1, bitsPerSample = 16;
+
+    // G2 mic is 8kHz 16-bit mono (not 16kHz)
+    const sampleRate = 8000, numChannels = 1, bitsPerSample = 16;
     const byteRate = sampleRate * numChannels * bitsPerSample / 8;
     const blockAlign = numChannels * bitsPerSample / 8;
     const dataSize = pcm.length;
@@ -29,14 +32,19 @@ export default async (req, context) => {
     view.setUint16(34, bitsPerSample, true); writeStr(36, "data"); view.setUint32(40, dataSize, true);
     const wav = new Uint8Array(44 + dataSize);
     wav.set(new Uint8Array(header), 0); wav.set(pcm, 44);
+
     const blob = new Blob([wav], { type: "audio/wav" });
     const form = new FormData();
     form.append("file", blob, "audio.wav");
     form.append("model_id", "scribe_v1");
+
     const res = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
       method: "POST", headers: { "xi-api-key": elKey }, body: form,
     });
-    if (!res.ok) { const err = await res.text(); return new Response(JSON.stringify({ error: err }), { status: 500, headers: cors }); }
+    if (!res.ok) {
+      const err = await res.text();
+      return new Response(JSON.stringify({ error: err }), { status: 500, headers: cors });
+    }
     const data = await res.json();
     return new Response(JSON.stringify({ transcript: data.text || "" }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (e) {
