@@ -81,10 +81,14 @@ if (!elRes.ok) {
   const getGToken = async () => {
     if (!gcid||!gcs||!grt) return null;
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
       const r = await fetch("https://oauth2.googleapis.com/token", {
         method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
-        body: new URLSearchParams({client_id:gcid,client_secret:gcs,refresh_token:grt,grant_type:"refresh_token"})
+        body: new URLSearchParams({client_id:gcid,client_secret:gcs,refresh_token:grt,grant_type:"refresh_token"}),
+        signal: controller.signal
       });
+      clearTimeout(timeout);
       return (await r.json()).access_token||null;
     } catch(e) { return null; }
   };
