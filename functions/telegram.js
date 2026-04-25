@@ -277,7 +277,7 @@ CREATE_EVENT|Title|2026-03-20T14:00:00|2026-03-20T15:00:00|optional@attendee.com
 CREATE_DOC|Document title|Optional content
 SEARCH_DRIVE|search terms
 
-Use web search for current info: news, weather, sports, research. Be concise.`;
+Use web search ONLY for: news, weather, sports, research, general knowledge. NEVER use web search for emails, calendar or Drive — you have direct API access to these. Be concise.`;
 
     const messages=[...hist.flatMap(t=>[{role:"user",content:t.u},{role:"assistant",content:t.a}]),{role:"user",content:txt}];
 
