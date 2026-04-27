@@ -331,13 +331,10 @@ export default async (req, context) => {
     const [m, hist, gt] = await Promise.all([loadMem(), loadHist(), getGToken()]);
 
     // Always fetch calendar + email in parallel — inject as facts, not guesses
-    console.log("[jarvis] gToken present?", !!gt, "error:", gTokenError);
     const [calToday, emailInbox] = await Promise.all([
-      getCalendar(gt, 24),
+      getCalendarRange(gt, new Date(), new Date(Date.now() + 7*24*3600000)),
       getEmails(gt)
     ]);
-    console.log("[jarvis] calendar:", calToday?.slice(0,100));
-    console.log("[jarvis] email:", emailInbox?.slice(0,100));
 
     const now = new Date();
     const today = now.toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
