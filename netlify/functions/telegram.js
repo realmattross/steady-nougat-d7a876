@@ -13,7 +13,6 @@ export default async (req, context) => {
   const spRefreshToken = Netlify.env.get("SPOTIFY_REFRESH_TOKEN");
   if (!tok || !key) return new Response("OK");
 
-  // Send plain text message
   const send = async (c, t) => {
     await fetch("https://api.telegram.org/bot"+tok+"/sendMessage", {
       method:"POST", headers:{"Content-Type":"application/json"},
@@ -21,7 +20,6 @@ export default async (req, context) => {
     });
   };
 
-  // Send text + voice message (used for Claude conversation replies only)
   const speakAndSend = async (c, t) => {
     await send(c, t);
     if (!elKey) return;
@@ -32,43 +30,18 @@ export default async (req, context) => {
         .replace(/`([^`]+)`/g, "$1")
         .replace(/#{1,6}\s/g, "")
         .slice(0, 5000);
-
-      const elRes = await fetch(
-        `https://api.elevenlabs.io/v1/text-to-speech/${elVoice}/stream`,
-        {
-          method: "POST",
-          headers: {
-            "xi-api-key": elKey,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            text: stripped,
-            model_id: "eleven_flash_v2_5",
-            voice_settings: { stability: 0.5, similarity_boost: 0.75 },
-          }),
-        }
-      );
-
-if (!elRes.ok) {
-  console.error("ElevenLabs error:", elRes.status, await elRes.text());
-  return;
-}
+      const elRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elVoice}/stream`, {
+        method: "POST",
+        headers: { "xi-api-key": elKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ text: stripped, model_id: "eleven_flash_v2_5", voice_settings: { stability: 0.5, similarity_boost: 0.75 } })
+      });
+      if (!elRes.ok) { console.error("ElevenLabs error:", elRes.status); return; }
       const audioBuffer = await elRes.arrayBuffer();
       const formData = new FormData();
       formData.append("chat_id", c);
-      formData.append(
-        "voice",
-        new Blob([audioBuffer], { type: "audio/mpeg" }),
-        "jarvis.mp3"
-      );
-
-      await fetch(`https://api.telegram.org/bot${tok}/sendVoice`, {
-        method: "POST",
-        body: formData,
-      });
-    } catch (err) {
-      console.error("Voice error (non-fatal):", err.message);
-    }
+      formData.append("voice", new Blob([audioBuffer], { type: "audio/mpeg" }), "jarvis.mp3");
+      await fetch(`https://api.telegram.org/bot${tok}/sendVoice`, { method: "POST", body: formData });
+    } catch (err) { console.error("Voice error:", err.message); }
   };
 
   let body; try { body = await req.json(); } catch(e) { return new Response("OK"); }
@@ -83,7 +56,7 @@ if (!elRes.ok) {
   // Google token
   let gTokenError = null;
   const getGToken = async () => {
-    if (!gcid||!gcs||!grt) { gTokenError = "Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN env vars"; return null; }
+    if (!gcid||!gcs||!grt) { gTokenError = "Missing Google env vars"; return null; }
     try {
       const r = await fetch("https://oauth2.googleapis.com/token", {
         method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
@@ -91,12 +64,11 @@ if (!elRes.ok) {
       });
       const d = await r.json();
       if (d.access_token) { gTokenError = null; return d.access_token; }
-      gTokenError = `Google token refresh failed: ${d.error||"unknown"} — ${d.error_description||JSON.stringify(d)}`;
+      gTokenError = `Google token failed: ${d.error||"unknown"}`;
       return null;
-    } catch(e) { gTokenError = `Google token fetch threw: ${e.message}`; return null; }
+    } catch(e) { gTokenError = `Google token error: ${e.message}`; return null; }
   };
 
-  // Download file from Telegram
   const getTelegramFile = async (fileId) => {
     const r = await fetch(`https://api.telegram.org/bot${tok}/getFile?file_id=${fileId}`);
     const d = await r.json();
@@ -109,8 +81,7 @@ if (!elRes.ok) {
     for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
     return {
       base64: btoa(binary),
-      mimeType: filePath.endsWith('.pdf') ? 'application/pdf' : 
-                filePath.endsWith('.png') ? 'image/png' : 'image/jpeg',
+      mimeType: filePath.endsWith('.pdf') ? 'application/pdf' : filePath.endsWith('.png') ? 'image/png' : 'image/jpeg',
       isImage: !filePath.endsWith('.pdf')
     };
   };
@@ -123,16 +94,18 @@ if (!elRes.ok) {
   };
 
   const getCalendarRange = async (gt, startDate, endDate) => {
-    if (!gt) return gTokenError ? `Calendar unavailable — ${gTokenError}` : "Calendar unavailable";
-    const r = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${startDate.toISOString()}&timeMax=${endDate.toISOString()}&singleEvents=true&orderBy=startTime&maxResults=15`,{headers:{Authorization:"Bearer "+gt}});
-    const d = await r.json();
-    if (!r.ok) return `Calendar error ${r.status}: ${d.error?.message||JSON.stringify(d).slice(0,200)}`;
-    if (!d.items?.length) return "No events";
-    return d.items.map(e=>{
-      const dt=e.start?.dateTime||e.start?.date||"";
-      const t=dt.includes("T")?new Date(dt).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",timeZone:"Europe/London"}):"All day";
-      return `${t} — ${e.summary||"Untitled"}`;
-    }).join("\n");
+    if (!gt) return "Calendar unavailable";
+    try {
+      const r = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${startDate.toISOString()}&timeMax=${endDate.toISOString()}&singleEvents=true&orderBy=startTime&maxResults=15`,{headers:{Authorization:"Bearer "+gt}});
+      const d = await r.json();
+      if (!r.ok) return `Calendar error: ${d.error?.message||r.status}`;
+      if (!d.items?.length) return "No events";
+      return d.items.map(e=>{
+        const dt=e.start?.dateTime||e.start?.date||"";
+        const t=dt.includes("T")?new Date(dt).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",timeZone:"Europe/London"}):"All day";
+        return `${t} — ${e.summary||"Untitled"}`;
+      }).join("\n");
+    } catch(e) { return `Calendar error: ${e.message}`; }
   };
 
   const createEvent = async (gt,title,startISO,endISO,attendees=[]) => {
@@ -147,17 +120,19 @@ if (!elRes.ok) {
   // Gmail
   const getEmails = async (gt) => {
     if (!gt) return gTokenError ? `Gmail unavailable — ${gTokenError}` : "Gmail unavailable";
-    const r=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent("in:inbox -category:promotions -category:social -from:noreply -from:no-reply")}&maxResults=6`,{headers:{Authorization:"Bearer "+gt}});
-    const d=await r.json();
-    if (!r.ok) return `Gmail error ${r.status}: ${d.error?.message||JSON.stringify(d).slice(0,200)}`;
-    if (!d.messages?.length) return "Inbox clear";
-    const emails=await Promise.all(d.messages.slice(0,6).map(async m=>{
-      const mr=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`,{headers:{Authorization:"Bearer "+gt}});
-      const md=await mr.json(); const h={};
-      for(const hh of(md.payload?.headers||[]))h[hh.name]=hh.value;
-      return `• ${(h.From||"?").replace(/<.*>/,"").trim().replace(/"/g,"")}: ${h.Subject||"No subject"}`;
-    }));
-    return emails.join("\n");
+    try {
+      const r=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent("in:inbox -category:promotions -category:social -from:noreply -from:no-reply")}&maxResults=6`,{headers:{Authorization:"Bearer "+gt}});
+      const d=await r.json();
+      if (!r.ok) return `Gmail error: ${d.error?.message||r.status}`;
+      if (!d.messages?.length) return "Inbox clear";
+      const emails=await Promise.all(d.messages.slice(0,6).map(async m=>{
+        const mr=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`,{headers:{Authorization:"Bearer "+gt}});
+        const md=await mr.json(); const h={};
+        for(const hh of(md.payload?.headers||[]))h[hh.name]=hh.value;
+        return `• ${(h.From||"?").replace(/<.*>/,"").trim().replace(/"/g,"")}: ${h.Subject||"No subject"}`;
+      }));
+      return emails.join("\n");
+    } catch(e) { return `Gmail error: ${e.message}`; }
   };
 
   const sendEmail = async (gt,to,subject,bodyText) => {
@@ -171,7 +146,6 @@ if (!elRes.ok) {
     } catch(e){return `Error: ${e.message}`;}
   };
 
-  // Drive
   const searchDrive = async (gt,query) => {
     if (!gt) return "Drive unavailable";
     const r=await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(`fullText contains '${query}' and trashed=false`)}&fields=files(id,name,webViewLink)&pageSize=5&orderBy=modifiedTime desc`,{headers:{Authorization:"Bearer "+gt}});
@@ -182,127 +156,84 @@ if (!elRes.ok) {
 
   // Spotify
   const getSpotifyToken = async () => {
-    if (!spClientId || !spClientSecret || !spRefreshToken) return null;
+    if (!spClientId||!spClientSecret||!spRefreshToken) return null;
     try {
-      const creds = btoa(`${spClientId}:${spClientSecret}`);
-      const r = await fetch("https://accounts.spotify.com/api/token", {
-        method: "POST",
-        headers: { "Authorization": `Basic ${creds}`, "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: spRefreshToken })
-      });
-      const d = await r.json();
-      return d.access_token || null;
-    } catch(e) { return null; }
+      const creds=btoa(`${spClientId}:${spClientSecret}`);
+      const r=await fetch("https://accounts.spotify.com/api/token",{method:"POST",headers:{Authorization:`Basic ${creds}`,"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"refresh_token",refresh_token:spRefreshToken})});
+      const d=await r.json(); return d.access_token||null;
+    } catch(e){return null;}
   };
 
   const getSpotifyDeviceId = async (st) => {
-    const r = await fetch("https://api.spotify.com/v1/me/player/devices", {
-      headers: { Authorization: `Bearer ${st}` }
-    });
-    const d = await r.json();
-    const active = d.devices?.find(dev => dev.is_active) || d.devices?.[0];
-    return active?.id || null;
+    const r=await fetch("https://api.spotify.com/v1/me/player/devices",{headers:{Authorization:`Bearer ${st}`}});
+    const d=await r.json();
+    const active=d.devices?.find(dev=>dev.is_active)||d.devices?.[0];
+    return active?.id||null;
   };
 
   const spotifyNowPlaying = async () => {
-    const st = await getSpotifyToken();
-    if (!st) return "Spotify not connected. Set up SPOTIFY_REFRESH_TOKEN first.";
+    const st=await getSpotifyToken(); if(!st) return "Spotify not connected.";
     try {
-      const r = await fetch("https://api.spotify.com/v1/me/player/currently-playing", {
-        headers: { Authorization: `Bearer ${st}` }
-      });
-      if (r.status === 204) return "Nothing playing on Spotify right now.";
-      const d = await r.json();
-      if (!d?.item) return "Nothing playing.";
-      const artists = d.item.artists?.map(a => a.name).join(", ") || "Unknown";
-      const track = d.item.name;
-      const album = d.item.album?.name;
-      const status = d.is_playing ? "▶ Now playing" : "⏸ Paused";
-      return `${status}: ${track} — ${artists}\nAlbum: ${album}`;
-    } catch(e) { return `Spotify error: ${e.message}`; }
+      const r=await fetch("https://api.spotify.com/v1/me/player/currently-playing",{headers:{Authorization:`Bearer ${st}`}});
+      if(r.status===204) return "Nothing playing on Spotify.";
+      const d=await r.json(); if(!d?.item) return "Nothing playing.";
+      const artists=d.item.artists?.map(a=>a.name).join(", ")||"Unknown";
+      return `${d.is_playing?"▶ Now playing":"⏸ Paused"}: ${d.item.name} — ${artists}\nAlbum: ${d.item.album?.name}`;
+    } catch(e){return `Spotify error: ${e.message}`;}
   };
 
   const spotifyControl = async (action) => {
-    const st = await getSpotifyToken();
-    if (!st) return "Spotify not connected.";
+    const st=await getSpotifyToken(); if(!st) return "Spotify not connected.";
     try {
-      const deviceId = await getSpotifyDeviceId(st);
-      const deviceParam = deviceId ? `?device_id=${deviceId}` : "";
-      let endpoint, method;
-      if (action === "play")   { endpoint = `/me/player/play${deviceParam}`;  method = "PUT"; }
-      if (action === "pause")  { endpoint = `/me/player/pause${deviceParam}`; method = "PUT"; }
-      if (action === "skip")   { endpoint = `/me/player/next${deviceParam}`;  method = "POST"; }
-      if (action === "prev")   { endpoint = `/me/player/previous${deviceParam}`; method = "POST"; }
-      const r = await fetch(`https://api.spotify.com/v1${endpoint}`, {
-        method, headers: { Authorization: `Bearer ${st}` }
-      });
-      if (r.status === 204 || r.ok) {
-        const labels = { play:"▶ Playing", pause:"⏸ Paused", skip:"⏭ Skipped", prev:"⏮ Previous track" };
-        return labels[action] || "Done.";
-      }
-      const err = await r.json();
-      return `Spotify error: ${err.error?.message || r.status}`;
-    } catch(e) { return `Spotify error: ${e.message}`; }
+      const deviceId=await getSpotifyDeviceId(st);
+      const dp=deviceId?`?device_id=${deviceId}`:"";
+      const map={play:[`/me/player/play${dp}`,"PUT"],pause:[`/me/player/pause${dp}`,"PUT"],skip:[`/me/player/next${dp}`,"POST"],prev:[`/me/player/previous${dp}`,"POST"]};
+      const [endpoint,method]=map[action]||[];
+      if(!endpoint) return "Unknown action";
+      const r=await fetch(`https://api.spotify.com/v1${endpoint}`,{method,headers:{Authorization:`Bearer ${st}`}});
+      if(r.status===204||r.ok) return {play:"▶ Playing",pause:"⏸ Paused",skip:"⏭ Skipped",prev:"⏮ Previous"}[action]||"Done.";
+      const err=await r.json(); return `Spotify error: ${err.error?.message||r.status}`;
+    } catch(e){return `Spotify error: ${e.message}`;}
   };
 
-  const spotifySearch = async (query, type = "track") => {
-    const st = await getSpotifyToken();
-    if (!st) return "Spotify not connected.";
+  const spotifySearch = async (query,type="track") => {
+    const st=await getSpotifyToken(); if(!st) return "Spotify not connected.";
     try {
-      const r = await fetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=${type}&limit=5`, {
-        headers: { Authorization: `Bearer ${st}` }
-      });
-      const d = await r.json();
-      if (type === "track") {
-        const tracks = d.tracks?.items;
-        if (!tracks?.length) return `No tracks found for "${query}"`;
-        return tracks.map((t,i) => `${i+1}. ${t.name} — ${t.artists.map(a=>a.name).join(", ")}\n   spotify:track:${t.id}`).join("\n\n");
-      }
-      if (type === "playlist") {
-        const playlists = d.playlists?.items;
-        if (!playlists?.length) return `No playlists found for "${query}"`;
-        return playlists.map((p,i) => `${i+1}. ${p.name} by ${p.owner?.display_name}\n   ${p.external_urls?.spotify}`).join("\n\n");
-      }
+      const r=await fetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=${type}&limit=5`,{headers:{Authorization:`Bearer ${st}`}});
+      const d=await r.json();
+      if(type==="track"){const t=d.tracks?.items;if(!t?.length)return `No tracks found for "${query}"`;return t.map((t,i)=>`${i+1}. ${t.name} — ${t.artists.map(a=>a.name).join(", ")}\n   spotify:track:${t.id}`).join("\n\n");}
+      if(type==="playlist"){const p=d.playlists?.items;if(!p?.length)return `No playlists found for "${query}"`;return p.map((p,i)=>`${i+1}. ${p.name} by ${p.owner?.display_name}\n   ${p.external_urls?.spotify}`).join("\n\n");}
       return "Search complete.";
-    } catch(e) { return `Spotify error: ${e.message}`; }
+    } catch(e){return `Spotify error: ${e.message}`;}
   };
 
   const spotifyPlayUri = async (uri) => {
-    const st = await getSpotifyToken();
-    if (!st) return "Spotify not connected.";
+    const st=await getSpotifyToken(); if(!st) return "Spotify not connected.";
     try {
-      const deviceId = await getSpotifyDeviceId(st);
-      if (!deviceId) return "No active Spotify device found. Open Spotify on your phone or Mac first.";
-      const isTrack = uri.includes(":track:");
-      const body = isTrack
-        ? { uris: [uri], device_id: deviceId }
-        : { context_uri: uri, device_id: deviceId };
-      const r = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${st}`, "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      });
-      if (r.status === 204 || r.ok) return `▶ Playing now`;
-      const err = await r.json();
-      return `Spotify error: ${err.error?.message || r.status}`;
-    } catch(e) { return `Spotify error: ${e.message}`; }
+      const deviceId=await getSpotifyDeviceId(st);
+      if(!deviceId) return "No active Spotify device. Open Spotify first.";
+      const isTrack=uri.includes(":track:");
+      const r=await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`,{method:"PUT",headers:{Authorization:`Bearer ${st}`,"Content-Type":"application/json"},body:JSON.stringify(isTrack?{uris:[uri]}:{context_uri:uri})});
+      if(r.status===204||r.ok) return "▶ Playing now";
+      const err=await r.json(); return `Spotify error: ${err.error?.message||r.status}`;
+    } catch(e){return `Spotify error: ${e.message}`;}
   };
 
-  // Google Docs
   const createDoc = async (gt,title,content) => {
-    if (!gt) return {error:"No token"};
+    if(!gt) return {error:"No token"};
     try {
       const r=await fetch("https://docs.googleapis.com/v1/documents",{method:"POST",headers:{Authorization:"Bearer "+gt,"Content-Type":"application/json"},body:JSON.stringify({title})});
       const d=await r.json();
-      if (!d.documentId) return {error:d.error?.message||"Failed"};
-      if (content) await fetch(`https://docs.googleapis.com/v1/documents/${d.documentId}:batchUpdate`,{method:"POST",headers:{Authorization:"Bearer "+gt,"Content-Type":"application/json"},body:JSON.stringify({requests:[{insertText:{location:{index:1},text:content}}]})});
+      if(!d.documentId) return {error:d.error?.message||"Failed"};
+      if(content) await fetch(`https://docs.googleapis.com/v1/documents/${d.documentId}:batchUpdate`,{method:"POST",headers:{Authorization:"Bearer "+gt,"Content-Type":"application/json"},body:JSON.stringify({requests:[{insertText:{location:{index:1},text:content}}]})});
       return {docUrl:`https://docs.google.com/document/d/${d.documentId}/edit`,title};
     } catch(e){return {error:e.message};}
   };
 
-  // Memory via Netlify Blobs
+  // Memory + history
   const { getStore } = await import("@netlify/blobs");
   const store = getStore("jarvis");
+  const hudStore = getStore("jarvis-data");
   const loadMem = async () => {try{return(await store.get("memory",{type:"json"}))||{items:[]};}catch(e){return{items:[]};}};
   const saveMem = async (m) => {try{await store.setJSON("memory",m);}catch(e){}};
   const loadPending = async () => {try{return await store.get("pending-"+cid,{type:"json"});}catch(e){return null;}};
@@ -310,7 +241,24 @@ if (!elRes.ok) {
   const loadHist = async () => {try{return((await store.get("hist-"+cid,{type:"json"}))||{t:[]}).t;}catch(e){return[];}};
   const saveHist = async (t) => {try{await store.setJSON("hist-"+cid,{t:t.slice(-10)});}catch(e){}};
 
-  // Handle photo messages
+  // Push to HUD blob directly
+  const pushHud = async (question, answer) => {
+    try {
+      const q = question.slice(0,60);
+      const a = clean(answer).slice(0,1500);
+      const lines = ["> "+q];
+      const words = a.split(" ");
+      let ln = "";
+      for (const word of words) {
+        if ((ln+" "+word).trim().length > 35) { if(ln) lines.push(ln.trim()); ln=word; }
+        else { ln=(ln+" "+word).trim(); }
+      }
+      if(ln) lines.push(ln.trim());
+      await hudStore.setJSON("hud-latest", {lines:lines.slice(0,20), ts:Date.now()});
+    } catch(e) {}
+  };
+
+  // Handle photos/documents
   if (msg.photo || msg.document) {
     const fileId = msg.photo ? msg.photo[msg.photo.length-1].file_id : msg.document.file_id;
     const caption = msg.caption || (msg.photo ? "What's in this image?" : "Summarise this document");
@@ -319,27 +267,23 @@ if (!elRes.ok) {
       if (!file) { await send(cid, "Could not download the file."); return new Response("OK"); }
       const [m, hist] = await Promise.all([loadMem(), loadHist()]);
       const today = new Date().toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
-      const system = `You are Jarvis, Matt's personal AI on Telegram. Sharp, warm, efficient. Plain text only. Today: ${today}. ${m.items?.length?"Memory:\n"+m.items.map(i=>"- "+i).join("\n"):""}`;
+      const system = `You are Jarvis, Matt's personal AI. Sharp, warm, efficient. Plain text only. Today: ${today}.${m.items?.length?" Memory:\n"+m.items.map(i=>"- "+i).join("\n"):""}`;
       const content = file.isImage
         ? [{type:"image",source:{type:"base64",media_type:file.mimeType,data:file.base64}},{type:"text",text:caption}]
         : [{type:"document",source:{type:"base64",media_type:"application/pdf",data:file.base64}},{type:"text",text:caption}];
-      const r = await fetch("https://api.anthropic.com/v1/messages",{
-        method:"POST",
-        headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},
-        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1024,system,messages:[...hist.flatMap(t=>[{role:"user",content:t.u},{role:"assistant",content:t.a}]),{role:"user",content}]})
-      });
+      const r = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1024,system,messages:[...hist.flatMap(t=>[{role:"user",content:t.u},{role:"assistant",content:t.a}]),{role:"user",content}]})});
       const d = await r.json();
-      const reply = clean(d.content?.[0]?.text || "Could not process the file.");
-      await saveHist([...hist,{u:"[sent a file: "+caption+"]",a:reply.substring(0,800)}]);
+      const reply = clean(d.content?.[0]?.text || "Could not process file.");
+      await saveHist([...hist,{u:"[file: "+caption+"]",a:reply.substring(0,800)}]);
       await send(cid, reply);
-    } catch(err) { await send(cid, "Error processing file: "+err.message?.slice(0,100)); }
+    } catch(err) { await send(cid, "Error: "+err.message?.slice(0,100)); }
     return new Response("OK");
   }
 
   const lower = txt.toLowerCase().trim();
-  console.log("[jarvis] incoming:", JSON.stringify(txt), "→ lower:", JSON.stringify(lower));
-  const yesWords = ["yes","yeah","yep","send it","do it","go ahead","confirm","ok","sure","send","create it","create","add it","y","sent","correct","go","proceed","do this","that's right","right","approved"];
-  const YES = yesWords.includes(lower) || lower.startsWith("yes") || lower.startsWith("y ");
+  console.log("[jarvis] incoming:", JSON.stringify(txt));
+  const yesWords = ["yes","yeah","yep","send it","do it","go ahead","confirm","ok","sure","send","create it","create","add it","y","correct","go","proceed","approved"];
+  const YES = yesWords.includes(lower) || lower.startsWith("yes ") || lower.startsWith("y ");
   const NO = ["no","cancel","nope","stop","abort"].includes(lower);
 
   // Pending confirmation
@@ -356,133 +300,101 @@ if (!elRes.ok) {
       }
       return new Response("OK");
     }
-    if (NO){await savePending(null);await send(cid,"Cancelled.");return new Response("OK");}
+    if (NO) { await savePending(null); await send(cid,"Cancelled."); return new Response("OK"); }
   }
 
-  // Memory commands (text only — no voice for system operations)
+  // Memory commands
   if(["memory","show memory","what do you remember"].includes(lower)){
     const m=await loadMem();
-    if(!m.items?.length){await send(cid,"Nothing saved yet. Try: remember Ed Shaw is Day2 co-founder");return new Response("OK");}
-    await send(cid,"Jarvis Memory:\n\n"+m.items.map((x,i)=>`${i+1}. ${x}`).join("\n"));return new Response("OK");
+    await send(cid,m.items?.length?"Jarvis Memory:\n\n"+m.items.map((x,i)=>`${i+1}. ${x}`).join("\n"):"Nothing saved yet.");
+    return new Response("OK");
   }
   const rem=txt.match(/^remember[:\s]+(.+)$/is);
   if(rem){const fact=rem[1].trim();const m=await loadMem();m.items=[...(m.items||[]).filter(i=>i!==fact),fact].slice(-500);await saveMem(m);await send(cid,`Saved. ${m.items.length} item(s) in memory.`);return new Response("OK");}
   const fgt=txt.match(/^forget[:\s]+(.+)$/i);
   if(fgt){const term=fgt[1].trim().toLowerCase();const m=await loadMem();m.items=(m.items||[]).filter(i=>!i.toLowerCase().includes(term));await saveMem(m);await send(cid,`Forgotten: ${fgt[1].trim()}`);return new Response("OK");}
-
-  // Direct commands (text only — no voice for quick lookups)
-  // Calendar — natural language matchers
-  const calTomorrow = /\b(tomorrow|tmrw)\b/i;
-  const calDayOfWeek = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\b/i;
-  const calToday = /\b(calendar|schedule|agenda|diary|what'?s (on|up|scheduled|coming)|what (have i got|do i have|is on)|events? (today|for today)?|meetings? (today|for today)?|any (events|meetings))\b/i;
-  const inboxPat = /\b(inbox|check (my )?(emails?|mail|inbox|messages)|(any|new|recent|unread) (emails?|mail|messages?)|what'?s in (my )?(inbox|mail|email)|anything in (my )?(inbox|email|mail))\b/i;
-  // Action-intent gate: if the message is asking Jarvis to DO something (create, send, etc.),
-  // skip read-only triggers and let the LLM parse it with full context.
-  const actionIntent = /\b(create|add|schedule|book|set up|set-up|setup|make|put|new|arrange|plan|invite|send|email|reply|respond|draft|write|compose|forward|remind|update|move|reschedule|change|cancel|delete|remove)\b/i;
-  const isAction = actionIntent.test(lower);
-  const wantsCalendar = !isAction && (calToday.test(lower) || calTomorrow.test(lower) || (calDayOfWeek.test(lower) && !inboxPat.test(lower)));
-  const wantsInbox = !isAction && inboxPat.test(lower) && !calToday.test(lower) && !calTomorrow.test(lower);
-
-  // Day-of-week lookup (e.g. "what's on Monday")
-  if(!isAction && calDayOfWeek.test(lower) && !inboxPat.test(lower) && !calTomorrow.test(lower)){
-    const dayMap={sun:0,sunday:0,mon:1,monday:1,tue:2,tues:2,tuesday:2,wed:3,wednesday:3,thu:4,thur:4,thurs:4,thursday:4,fri:5,friday:5,sat:6,saturday:6};
-    const match=lower.match(calDayOfWeek);
-    const targetDow=dayMap[match[1].toLowerCase()];
-    const now=new Date();
-    const daysAhead=((targetDow-now.getDay())+7)%7||7; // always look forward; same day = next week
-    const startOfDay=new Date(now.getFullYear(),now.getMonth(),now.getDate()+daysAhead,0,0,0);
-    const endOfDay=new Date(startOfDay.getTime()+24*3600000);
-    const gt=await getGToken();
-    const label=startOfDay.toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long"});
-    const events=await getCalendarRange(gt,startOfDay,endOfDay);
-    await send(cid,`${label}:\n\n${events}`);
-    return new Response("OK");
-  }
-
-  if(!isAction && calTomorrow.test(lower)){const gt=await getGToken();await send(cid,"Tomorrow:\n\n"+await getCalendar(gt,48));return new Response("OK");}
-  if(wantsCalendar){console.log("[jarvis] calendar trigger hit");const gt=await getGToken();console.log("[jarvis] gt present?",!!gt,"err:",gTokenError);await send(cid,"Today:\n\n"+await getCalendar(gt,24));return new Response("OK");}
-  if(wantsInbox){const gt=await getGToken();await send(cid,"Inbox:\n\n"+await getEmails(gt));return new Response("OK");}
   if(lower==="clear history"){await saveHist([]);await send(cid,"History cleared.");return new Response("OK");}
-  if(["briefing","brief me","morning briefing","daily briefing","give me a briefing"].includes(lower)){
-    const gt=await getGToken();
-    const [cal,inbox]=await Promise.all([getCalendar(gt,24),getEmails(gt)]);
-    await send(cid,"Calendar:\n\n"+cal+"\n\nInbox:\n\n"+inbox);
-    return new Response("OK");
-  }
 
-  // Spotify direct commands
-  if(["now playing","what's playing","spotify","whats playing","what is playing"].includes(lower)){
-    await send(cid, await spotifyNowPlaying()); return new Response("OK");
-  }
-  if(["play","resume","spotify play"].includes(lower)){
-    await send(cid, await spotifyControl("play")); return new Response("OK");
-  }
-  if(["pause","spotify pause"].includes(lower)){
-    await send(cid, await spotifyControl("pause")); return new Response("OK");
-  }
-  if(["skip","next","next track","spotify skip","spotify next"].includes(lower)){
-    await send(cid, await spotifyControl("skip")); return new Response("OK");
-  }
-  if(["previous","prev","back","spotify back","spotify previous"].includes(lower)){
-    await send(cid, await spotifyControl("prev")); return new Response("OK");
-  }
-  const spSearch = lower.match(/^spotify search (.+)$/);
-  if(spSearch){ await send(cid, await spotifySearch(spSearch[1])); return new Response("OK"); }
-  const spPlaylist = lower.match(/^spotify playlist (.+)$/);
-  if(spPlaylist){ await send(cid, await spotifySearch(spPlaylist[1], "playlist")); return new Response("OK"); }
-  const spUri = txt.match(/spotify:(track|playlist|album|artist):[a-zA-Z0-9]+/);
-  if(spUri){ await send(cid, await spotifyPlayUri(spUri[0])); return new Response("OK"); }
+  // Spotify direct commands (no LLM needed)
+  if(["now playing","what's playing","spotify","whats playing","what is playing"].includes(lower)){await send(cid,await spotifyNowPlaying());return new Response("OK");}
+  if(["play","resume","spotify play"].includes(lower)){await send(cid,await spotifyControl("play"));return new Response("OK");}
+  if(["pause","spotify pause"].includes(lower)){await send(cid,await spotifyControl("pause"));return new Response("OK");}
+  if(["skip","next","next track","spotify skip","spotify next"].includes(lower)){await send(cid,await spotifyControl("skip"));return new Response("OK");}
+  if(["previous","prev","back","spotify back","spotify previous"].includes(lower)){await send(cid,await spotifyControl("prev"));return new Response("OK");}
+  const spSearch=lower.match(/^spotify search (.+)$/);if(spSearch){await send(cid,await spotifySearch(spSearch[1]));return new Response("OK");}
+  const spPlaylist=lower.match(/^spotify playlist (.+)$/);if(spPlaylist){await send(cid,await spotifySearch(spPlaylist[1],"playlist"));return new Response("OK");}
+  const spUri=txt.match(/spotify:(track|playlist|album|artist):[a-zA-Z0-9]+/);if(spUri){await send(cid,await spotifyPlayUri(spUri[0]));return new Response("OK");}
 
-  // Claude chat — uses speakAndSend for voice replies
+  // ─── MAIN CLAUDE CALL ───────────────────────────────────────────────────────
+  // Always pre-fetch real context before Claude sees the message
   try {
     const [m, hist, gt] = await Promise.all([loadMem(), loadHist(), getGToken()]);
-    const today = new Date().toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
 
-    const system = `You are Jarvis, Matt's personal AI on Telegram. Sharp, warm, efficient. Plain text only — no markdown, no asterisks, no bold.
+    // Always fetch calendar + email in parallel — inject as facts, not guesses
+    const [calToday, emailInbox] = await Promise.all([
+      getCalendar(gt, 24),
+      getEmails(gt)
+    ]);
 
-Matt Ross — CEO Day2Health, Parkinson's platform. BGV accelerator. Northleach Cotswolds. Ex-Google/YouTube.
-Today: ${today}
-${m.items?.length?"IMPORTANT MEMORY — always apply these in conversation:\n"+m.items.map(i=>"- "+i).join("\n"):""}
+    const now = new Date();
+    const today = now.toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
+    const timeNow = now.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",timeZone:"Europe/London"});
 
-You can take real actions: send emails, create calendar events, create Google Docs, search Drive, control Spotify.
-When asked, show details and ask confirmation. Then output the action on the LAST LINE ONLY (nothing after it):
-SEND_EMAIL|to@email.com|Subject|Body
-CREATE_EVENT|Title|2026-03-20T14:00:00|2026-03-20T15:00:00|optional@attendee.com
-CREATE_DOC|Document title|Optional content
-SEARCH_DRIVE|search terms
-SPOTIFY_SEARCH|track or artist name
-SPOTIFY_PLAYLIST|playlist name
-SPOTIFY_PLAY_URI|spotify:track:xxxx
+    const system = `You are Jarvis, Matt's personal AI assistant. Sharp, warm, concise. Plain text only — no markdown, no asterisks, no bold, no bullet symbols.
 
-Use web search for current info: news, weather, sports, research. Be concise.`;
+IDENTITY: Matt Ross — CEO Day2Health (Parkinson's digital health). BGV accelerator. Northleach, Cotswolds. Ex-Google/YouTube global head of brand.
 
-    const messages=[...hist.flatMap(t=>[{role:"user",content:t.u},{role:"assistant",content:t.a}]),{role:"user",content:txt}];
+TIME: ${today}, ${timeNow} UK time
 
-    const r=await fetch("https://api.anthropic.com/v1/messages",{
+CALENDAR TODAY (live data):
+${calToday}
+
+EMAIL INBOX (live data — most recent first):
+${emailInbox}
+
+${m.items?.length ? "MEMORY:\n"+m.items.map(i=>"- "+i).join("\n")+"\n" : ""}
+RULES:
+- The calendar and email above are REAL live data. Never invent events or emails not listed above.
+- If asked about calendar/email, answer directly from the data above.
+- For current news, weather, sports — use web search.
+- For actions (send email, create event, create doc, search Drive, control Spotify) — confirm first, then output the action token on the LAST LINE ONLY with nothing after it:
+  SEND_EMAIL|to@email.com|Subject|Body
+  CREATE_EVENT|Title|2026-04-27T14:00:00|2026-04-27T15:00:00|optional@attendee.com
+  CREATE_DOC|Document title|Optional content
+  SEARCH_DRIVE|search terms
+  SPOTIFY_SEARCH|track or artist name
+  SPOTIFY_PLAYLIST|playlist name
+  SPOTIFY_PLAY_URI|spotify:track:xxxx
+- Be concise. One short paragraph max unless detail is specifically requested.`;
+
+    const messages = [...hist.flatMap(t=>[{role:"user",content:t.u},{role:"assistant",content:t.a}]),{role:"user",content:txt}];
+
+    const r = await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},
       body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1024,system,messages,tools:[{type:"web_search_20250305",name:"web_search"}]})
     });
-    const d=await r.json();
+    const d = await r.json();
 
-    let reply = (d.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"No response").trim();
+    let reply = (d.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"").trim();
 
-    if (!reply && d.stop_reason === "tool_use") {
-      const toolResults = d.content.filter(b=>b.type==="tool_use").map(b=>({
-        type:"tool_result", tool_use_id:b.id, content:"Search completed"
-      }));
-      const r2=await fetch("https://api.anthropic.com/v1/messages",{
+    // Handle web search tool use
+    if ((!reply || d.stop_reason==="tool_use") && d.content?.some(b=>b.type==="tool_use")) {
+      const toolResults = d.content.filter(b=>b.type==="tool_use").map(b=>({type:"tool_result",tool_use_id:b.id,content:"Search completed"}));
+      const r2 = await fetch("https://api.anthropic.com/v1/messages",{
         method:"POST",
         headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},
         body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1024,system,messages:[...messages,{role:"assistant",content:d.content},{role:"user",content:toolResults}]})
       });
-      const d2=await r2.json();
-      reply=(d2.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"No response").trim();
+      const d2 = await r2.json();
+      reply = (d2.content?.filter(b=>b.type==="text").map(b=>b.text).join("")||"No response").trim();
     }
 
-    const lines=reply.split("\n");
-    const last=lines[lines.length-1].trim();
-    const visible=lines.slice(0,-1).join("\n").trim();
+    if (!reply) reply = "No response";
+
+    const replyLines = reply.split("\n");
+    const last = replyLines[replyLines.length-1].trim();
+    const visible = replyLines.slice(0,-1).join("\n").trim();
 
     if(last.startsWith("SEND_EMAIL|")){
       const p=last.split("|");
@@ -509,33 +421,18 @@ Use web search for current info: news, weather, sports, research. Be concise.`;
       await saveHist([...hist,{u:txt.substring(0,400),a:reply.substring(0,800)}]);
       await send(cid,(visible?visible+"\n\n":"")+results);
     } else if(last.startsWith("SPOTIFY_PLAY_URI|")){
-      const uri=last.replace("SPOTIFY_PLAY_URI|","").trim();
-      const result=await spotifyPlayUri(uri);
+      const result=await spotifyPlayUri(last.replace("SPOTIFY_PLAY_URI|","").trim());
       await saveHist([...hist,{u:txt.substring(0,400),a:reply.substring(0,800)}]);
       await send(cid,(visible?visible+"\n\n":"")+result);
     } else {
       await saveHist([...hist,{u:txt.substring(0,400),a:reply.substring(0,800)}]);
-      try{
-        const {getStore}=await import("@netlify/blobs");
-        const store=getStore("jarvis-data");
-        const q=txt.slice(0,60);
-        const a=clean(reply).slice(0,1500);
-        const lines=["> "+q];
-        const words=a.split(" ");
-        let ln="";
-        for(const word of words){
-          if((ln+" "+word).trim().length>35){if(ln)lines.push(ln.trim());ln=word;}
-          else{ln=(ln+" "+word).trim();}
-        }
-        if(ln)lines.push(ln.trim());
-        await store.setJSON("hud-latest",{lines:lines.slice(0,20),ts:Date.now()});
-      }catch(hudErr){}
+      await pushHud(txt, reply);
       await speakAndSend(cid,clean(reply));
     }
-  } catch(err){await send(cid,"ERROR: "+err.message?.slice(0,200));}
+  } catch(err){ await send(cid,"ERROR: "+err.message?.slice(0,200)); }
   return new Response("OK");
 };
 
-function clean(t){return t.replace(/\*\*([^*]+)\*\*/g,"$1").replace(/\*([^*]+)\*/g,"$1").replace(/`([^`]+)`/g,"$1");}
+function clean(t){return t.replace(/\*\*([^*]+)\*\*/g,"$1").replace(/\*([^*]+)\*/g,"$1").replace(/`([^`]+)`/g,"$1").replace(/#{1,6}\s/g,"");}
 
 export const config = { path: "/telegram" };
