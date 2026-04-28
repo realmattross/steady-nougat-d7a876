@@ -346,7 +346,7 @@ IDENTITY: Matt Ross — CEO Day2Health (Parkinson's digital health). BGV acceler
 
 TIME: ${today}, ${timeNow} UK time
 
-CALENDAR TODAY (live data):
+CALENDAR — NEXT 7 DAYS (live data, all upcoming events):
 ${calToday}
 
 EMAIL INBOX (live data — most recent first):
