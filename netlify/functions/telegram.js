@@ -245,7 +245,10 @@ export default async (req, context) => {
       await send(cid, reply);
     }
   } catch (err) {
-    await send(cid, `Couldn't reach Jeeves: ${err.message?.slice(0, 200)}`);
+    // Surface diagnostic info so we can see what the function is actually doing
+    const debug = `URL=${tunnelUrl} HasAuth=${!!authToken} Err=${err.message?.slice(0, 160)}`;
+    console.error("[telegram] askBrain failed —", debug);
+    await send(cid, `Couldn't reach Jeeves. ${debug}`);
   }
   return new Response("OK");
 };
