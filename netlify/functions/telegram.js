@@ -118,25 +118,45 @@ export default async (req, context) => {
 
   // -------------------------------------------------------------------------
   // Deepgram — transcribe a voice note to text
+  // Telegram voice notes are OGG/Opus by default; the message may include
+  // mime_type. We pass it through (defaulting to audio/ogg) so Deepgram
+  // doesn't have to guess. nova-2 handles Opus natively.
   // -------------------------------------------------------------------------
-  const transcribe = async (buffer) => {
-    if (!dgKey || !buffer) return null;
+  const transcribe = async (buffer, mimeType) => {
+    if (!dgKey) {
+      console.error("[deepgram] DEEPGRAM_API_KEY not set");
+      return null;
+    }
+    if (!buffer || buffer.byteLength === 0) {
+      console.error("[deepgram] empty audio buffer");
+      return null;
+    }
+    const contentType = mimeType || "audio/ogg";
     try {
       const r = await fetch(
-        "https://api.deepgram.com/v1/listen?model=nova-2&punctuate=true&language=en",
+        "https://api.deepgram.com/v1/listen?model=nova-2&punctuate=true&language=en&smart_format=true",
         {
           method: "POST",
           headers: {
             Authorization: `Token ${dgKey}`,
-            "Content-Type": "audio/ogg",
+            "Content-Type": contentType,
           },
           body: buffer,
         }
       );
+      if (!r.ok) {
+        const errBody = await r.text().catch(() => "");
+        console.error("[deepgram] HTTP", r.status, "body:", errBody.slice(0, 300));
+        return null;
+      }
       const d = await r.json();
-      return d?.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() || null;
+      const transcript = d?.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim();
+      if (!transcript) {
+        console.error("[deepgram] empty transcript in response:", JSON.stringify(d).slice(0, 300));
+      }
+      return transcript || null;
     } catch (e) {
-      console.error("Deepgram transcribe error:", e.message);
+      console.error("[deepgram] transcribe threw:", e.message);
       return null;
     }
   };
@@ -185,13 +205,25 @@ export default async (req, context) => {
 
   // Resolve the user's text — either typed or transcribed from voice
   let text = msg.text?.trim();
+  const originallyVoice = !!msg.voice;
+
   if (!text && msg.voice) {
+    console.log("[telegram] voice note received, file_id:", msg.voice.file_id,
+                "duration:", msg.voice.duration, "mime:", msg.voice.mime_type);
     const buf = await downloadTelegramFile(msg.voice.file_id);
-    text = await transcribe(buf);
+    if (!buf) {
+      console.error("[telegram] failed to download voice file from Telegram");
+      await send(cid, "Couldn't download that voice note.");
+      return new Response("OK");
+    }
+    console.log("[telegram] voice downloaded, bytes:", buf.byteLength);
+    text = await transcribe(buf, msg.voice.mime_type);
     if (!text) {
+      console.error("[telegram] Deepgram returned empty transcript");
       await send(cid, "Couldn't make out that voice note.");
       return new Response("OK");
     }
+    console.log("[telegram] transcribed:", text.slice(0, 200));
   }
 
   // Photos / docs / etc — punt for now; vision isn't wired into the brain yet
@@ -202,10 +234,16 @@ export default async (req, context) => {
     return new Response("OK");
   }
 
-  // Forward to the brain, send the reply back as both text + voice note
+  // Forward to the brain. Reply modality matches the input:
+  //   typed   → text reply only (don't spam voice notes when not asked)
+  //   voice   → text + voice reply (hands probably busy)
   try {
     const reply = await askBrain(cid, text);
-    await speakAndSend(cid, reply);
+    if (originallyVoice) {
+      await speakAndSend(cid, reply);
+    } else {
+      await send(cid, reply);
+    }
   } catch (err) {
     await send(cid, `Couldn't reach Jeeves: ${err.message?.slice(0, 200)}`);
   }
