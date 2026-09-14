@@ -248,6 +248,7 @@ async function finish(byDay, counts, payload) {
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   await st.setJSON("meta/last-ingest", {
     at: new Date().toISOString(),
+    raw: JSON.stringify(payload).slice(0, 4000),
     payloadTimestamp: payload?.timestamp || payload?.exportDate || null,
     counts,
     total,
