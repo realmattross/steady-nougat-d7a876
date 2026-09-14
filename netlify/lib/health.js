@@ -78,6 +78,9 @@ const HW = {
   respiratory_rate: ["resp", "breaths_per_min", "point"],
   weight: ["weight", "kg", "point"],
   vo2_max: ["vo2max", "ml_per_kg_per_min", "point"],
+  heart_rate: ["hr", "bpm", "point"],
+  body_fat: ["body_fat", "percentage", "point"],
+  body_temperature: ["body_temp", "celsius", "point"],
 };
 
 const titleCase = (s) => String(s || "Workout").toLowerCase().replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -112,6 +115,10 @@ export async function ingest(payload) {
         if (short === "spo2" && v > 1) v = v / 100; // store as fraction like HealthKit
         put(localDate(start), `${short}|${start}|${end}`, { t: short, v, s: start, e: end });
       }
+    }
+    for (const s of payload.blood_pressure || []) {
+      if (!s.time) continue;
+      put(localDate(s.time), `bp|${s.time}`, { t: "bp", sys: Number(s.systolic_mmhg), dia: Number(s.diastolic_mmhg), s: s.time, e: s.time });
     }
     for (const s of payload.sleep || []) {
       const end = s.session_end_time || s.end_time;
@@ -208,6 +215,10 @@ export async function dayStats(date) {
   out.spo2 = avg("spo2") != null ? Math.round(avg("spo2") * 1000) / 10 : null; // fraction -> %
   out.vo2max = last("vo2max") != null ? Math.round(last("vo2max") * 10) / 10 : null;
   out.distance_km = sum("distance_m") != null ? Math.round(sum("distance_m") / 100) / 10 : null;
+  const hrs = samples.filter((s) => s.t === "hr").map((s) => s.v).filter((v) => typeof v === "number");
+  out.hr = hrs.length ? { avg: Math.round(hrs.reduce((a, b) => a + b, 0) / hrs.length), min: Math.min(...hrs), max: Math.max(...hrs), n: hrs.length } : null;
+  const bps = samples.filter((s) => s.t === "bp").sort((a, b) => a.s.localeCompare(b.s));
+  out.bp = bps.length ? { sys: Math.round(bps[bps.length - 1].sys), dia: Math.round(bps[bps.length - 1].dia), at: localTime(bps[bps.length - 1].s), n: bps.length } : null;
 
   // Sleep (Health Webhook sessions): pick the longest session ending this day.
   const sessions = samples.filter((s) => s.t === "sleepsession").sort((a, b) => b.total - a.total);
@@ -315,6 +326,11 @@ export async function morningMessage(today = todayLocal()) {
     if (p != null && p <= -20) flags.push(`HRV ${Math.abs(p)}% below your week`);
   }
   if (t.spo2 ?? y.spo2) vitals.push(`SpO2 ${t.spo2 ?? y.spo2}%`);
+  const bp = t.bp ?? y.bp;
+  if (bp) {
+    vitals.push(`BP ${bp.sys}/${bp.dia}`);
+    if (bp.sys > 140 || bp.dia > 90) flags.push(`BP high (${bp.sys}/${bp.dia})`);
+  }
   if (vitals.length) lines.push(vitals.join(" · "));
 
   // Yesterday's activity
