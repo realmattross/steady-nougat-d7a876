@@ -5,6 +5,7 @@
  * GET /health/report?morning=1&send=1  -> generate AND send to Telegram
  * GET /health/report?status=1          -> last-ingest metadata
  * GET /health/report?wipe=YYYY-MM-DD   -> delete that day's stored samples (test cleanup)
+ * GET /health/report?raw=1&days=N      -> stored samples for the last N days (for the Mac mirror)
  *
  * Auth: Bearer $HEALTH_INGEST_TOKEN (or ?token=)
  * Used by Jeeves (Mac) to answer "how did I sleep?" and for manual testing.
@@ -35,6 +36,17 @@ export default async (req) => {
       return json({ sent: !!q.get("send"), ...m });
     }
     const days = Number(q.get("days") || 0);
+    if (q.get("raw")) {
+      const today = todayLocal();
+      const n = Math.min(Math.max(days || 3, 1), 60);
+      const out = [];
+      for (let i = n - 1; i >= 0; i--) {
+        const date = shiftDate(today, -i);
+        const rec = await store().get(`day/${date}`, { type: "json" });
+        out.push({ date, updated: rec?.updated || null, samples: rec?.samples || {} });
+      }
+      return json(out);
+    }
     if (days > 0) {
       const today = todayLocal();
       const out = [];
