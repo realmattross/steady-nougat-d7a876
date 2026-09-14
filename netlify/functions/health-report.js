@@ -4,6 +4,7 @@
  * GET /health/report?morning=1         -> the morning summary text + data (no send)
  * GET /health/report?morning=1&send=1  -> generate AND send to Telegram
  * GET /health/report?status=1          -> last-ingest metadata
+ * GET /health/report?wipe=YYYY-MM-DD   -> delete that day's stored samples (test cleanup)
  *
  * Auth: Bearer $HEALTH_INGEST_TOKEN (or ?token=)
  * Used by Jeeves (Mac) to answer "how did I sleep?" and for manual testing.
@@ -18,6 +19,12 @@ export default async (req) => {
   const q = new URL(req.url).searchParams;
 
   try {
+    if (q.get("wipe")) {
+      const date = q.get("wipe");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return json({ error: "wipe=YYYY-MM-DD" }, 400);
+      await store().delete(`day/${date}`);
+      return json({ wiped: date });
+    }
     if (q.get("status")) {
       const meta = await store().get("meta/last-ingest", { type: "json" });
       return json({ lastIngest: meta || null, today: todayLocal() });
