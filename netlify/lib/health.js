@@ -62,7 +62,9 @@ export const shiftDate = (ymd, days) => {
   return dt.toISOString().slice(0, 10);
 };
 
-export const store = () => getStore(STORE);
+// Strong consistency: ingest does read-modify-write per day, and the morning
+// summary may run seconds after a sync lands.
+export const store = () => getStore({ name: STORE, consistency: "strong" });
 
 // Health Webhook (hcwebhook.com) payload keys -> parser
 // Each entry: [shortType, valueField, timeMode] where timeMode is "point" (time) or "range" (start_time/end_time)
