@@ -83,6 +83,38 @@ const HW = {
   body_temperature: ["body_temp", "celsius", "point"],
 };
 
+// Health Auto Export-style metric names -> short type. Used for payloads of the
+// form { data: { metrics: [{ name, units, data: [{ date, qty, source }] }] } }
+// — sent by Health Auto Export's REST automation or by an iOS Shortcut built
+// to the same shape. Gait metrics come from the iPhone's motion chip and are
+// only reachable this way (Health Webhook doesn't export them).
+const HAE = {
+  walking_speed: "walking_speed",
+  walking_step_length: "walking_step_length",
+  walking_asymmetry_percentage: "walking_asymmetry",
+  walking_double_support_percentage: "walking_double_support",
+  walking_steadiness: "walking_steadiness",
+  step_count: "steps",
+  walking_running_distance: "distance_m",
+  active_energy: "active_kcal",
+  apple_exercise_time: "exercise_min",
+  resting_heart_rate: "rhr",
+  heart_rate_variability: "hrv",
+  blood_oxygen_saturation: "spo2",
+  respiratory_rate: "resp",
+  weight_body_mass: "weight",
+  vo2_max: "vo2max",
+};
+export const GAIT = new Set(["walking_speed", "walking_step_length", "walking_asymmetry", "walking_double_support", "walking_steadiness"]);
+
+const parseHaeDate = (d) => {
+  if (!d) return null;
+  const m = String(d).match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) ([+-]\d{2})(\d{2})$/); // "2026-09-14 08:00:00 +0100"
+  const iso = m ? `${m[1]}T${m[2]}${m[3]}:${m[4]}` : String(d);
+  const t = new Date(iso);
+  return isNaN(t) ? null : t.toISOString();
+};
+
 const titleCase = (s) => String(s || "Workout").toLowerCase().replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
 /**
@@ -101,6 +133,18 @@ export async function ingest(payload) {
     (byDay[date] ||= {})[key] = rec;
     counts[rec.t] = (counts[rec.t] || 0) + 1;
   };
+
+  // ---- Flat Shortcut format: { gait: { walking_speed: 4.2, walking_speed_unit: "km/h", ... }, date?: ISO } ----
+  // Easiest shape to build with one Dictionary action in iOS Shortcuts.
+  if (payload?.gait && typeof payload.gait === "object" && !Array.isArray(payload.gait)) {
+    const at = (payload.date && !isNaN(new Date(payload.date))) ? new Date(payload.date).toISOString() : new Date().toISOString();
+    for (const g of GAIT) {
+      const v = Number(payload.gait[g]);
+      if (payload.gait[g] === undefined || payload.gait[g] === "" || isNaN(v)) continue;
+      put(localDate(at), `${g}|${at}`, { t: g, v, u: String(payload.gait[`${g}_unit`] || ""), s: at, e: at });
+    }
+    return finish(byDay, counts, payload);
+  }
 
   // ---- Health Webhook format ----
   if (payload && !payload.data) {
@@ -141,6 +185,25 @@ export async function ingest(payload) {
         dist: Math.round(Number(w.distance_meters || 0)),
         s: w.start_time, e: w.end_time,
       });
+    }
+    return finish(byDay, counts, payload);
+  }
+
+  // ---- Health Auto Export-style format (REST automation / iOS Shortcut) ----
+  if (Array.isArray(payload?.data?.metrics)) {
+    for (const m of payload.data.metrics) {
+      const short = HAE[String(m?.name || "").toLowerCase()];
+      if (!short || !Array.isArray(m.data)) continue;
+      for (const r of m.data) {
+        const start = parseHaeDate(r.date || r.startDate);
+        if (!start) continue;
+        let v = Number(r.qty ?? r.Avg ?? r.value);
+        if (isNaN(v)) continue;
+        const unit = m.units || r.units || "";
+        if (short === "distance_m") v = /mi/i.test(unit) ? v * 1609.344 : /km/i.test(unit) ? v * 1000 : v;
+        if (short === "spo2" && v > 1) v = v / 100;
+        put(localDate(start), `${short}|${start}`, { t: short, v, u: unit, s: start, e: start });
+      }
     }
     return finish(byDay, counts, payload);
   }
@@ -215,6 +278,11 @@ export async function dayStats(date) {
   out.spo2 = avg("spo2") != null ? Math.round(avg("spo2") * 1000) / 10 : null; // fraction -> %
   out.vo2max = last("vo2max") != null ? Math.round(last("vo2max") * 10) / 10 : null;
   out.distance_km = sum("distance_m") != null ? Math.round(sum("distance_m") / 100) / 10 : null;
+  out.gait = {};
+  for (const g of GAIT) {
+    const xs = samples.filter((s) => s.t === g).sort((a, b) => a.s.localeCompare(b.s));
+    if (xs.length) out.gait[g] = { value: Math.round(xs[xs.length - 1].v * 100) / 100, unit: xs[xs.length - 1].u || "", n: xs.length };
+  }
   const hrs = samples.filter((s) => s.t === "hr").map((s) => s.v).filter((v) => typeof v === "number");
   out.hr = hrs.length ? { avg: Math.round(hrs.reduce((a, b) => a + b, 0) / hrs.length), min: Math.min(...hrs), max: Math.max(...hrs), n: hrs.length } : null;
   const bps = samples.filter((s) => s.t === "bp").sort((a, b) => a.s.localeCompare(b.s));
