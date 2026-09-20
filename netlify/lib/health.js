@@ -484,11 +484,36 @@ export async function sendMorningOnce({ force = false, via = "unknown" } = {}) {
     text = `Health: no data for today or yesterday (${last}). Check Health Webhook on your phone.`;
   }
   await sendTelegram(text);
-  log[today] = { sent: true, at: new Date().toISOString(), via, hasData: !!hasData };
+  log[today] = { sent: true, at: new Date().toISOString(), via, hasData: !!hasData, sleepIncluded: !!m.today.sleep };
   // keep the log small
   for (const k of Object.keys(log).sort().slice(0, -30)) delete log[k];
   await st.setJSON("meta/morning-log", log);
   return { sent: true, already: false, date: today, via, text };
+}
+
+/**
+ * If this morning's summary went out without last night's sleep and the band
+ * has since synced it, send a one-line follow-up (once per day).
+ */
+export async function sendSleepFollowup({ via = "unknown" } = {}) {
+  const st = store();
+  const today = todayLocal();
+  const log = (await st.get("meta/morning-log", { type: "json" })) || {};
+  const entry = log[today];
+  if (!entry?.sent) return { sent: false, reason: "morning not sent yet" };
+  if (entry.sleepIncluded) return { sent: false, reason: "sleep was in the morning summary" };
+  if (entry.followup) return { sent: false, reason: "follow-up already sent" };
+  const t = await dayStats(today);
+  if (!t.sleep) return { sent: false, reason: "still no sleep data" };
+  const b = await baseline(today, 7);
+  const p = pct(t.sleep.total_min, b.sleep_min);
+  let text = `Sleep update: ${hm(t.sleep.total_min)}${arrow(p)}`;
+  if (t.sleep.bed && t.sleep.wake) text += ` · ${t.sleep.bed}–${t.sleep.wake}`;
+  if (t.sleep.total_min < 360) text += " · short night";
+  await sendTelegram(text);
+  entry.followup = { at: new Date().toISOString(), via };
+  await st.setJSON("meta/morning-log", log);
+  return { sent: true, text };
 }
 
 export async function sendTelegram(text) {

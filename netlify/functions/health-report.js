@@ -3,6 +3,7 @@
  * GET /health/report?days=7            -> last N days of stats
  * GET /health/report?morning=1         -> the morning summary text + data (no send)
  * GET /health/report?morning=1&send=1  -> send to Telegram if not already sent today (&force=1 to resend)
+ * GET /health/report?sleepfollowup=1   -> send "Sleep update" if sleep arrived after the morning summary
  * GET /health/report?status=1          -> last-ingest metadata
  * GET /health/report?wipe=YYYY-MM-DD   -> delete that day's stored samples (test cleanup)
  * GET /health/report?raw=1&days=N      -> stored samples for the last N days (for the Mac mirror)
@@ -10,7 +11,7 @@
  * Auth: Bearer $HEALTH_INGEST_TOKEN (or ?token=)
  * Used by Jeeves (Mac) to answer "how did I sleep?" and for manual testing.
  */
-import { authed, dayStats, todayLocal, shiftDate, morningMessage, sendMorningOnce, store } from "../lib/health.js";
+import { authed, dayStats, todayLocal, shiftDate, morningMessage, sendMorningOnce, sendSleepFollowup, store } from "../lib/health.js";
 
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj, null, 2), { status, headers: { "Content-Type": "application/json" } });
@@ -26,6 +27,7 @@ export default async (req) => {
       await store().delete(`day/${date}`);
       return json({ wiped: date });
     }
+    if (q.get("sleepfollowup")) return json(await sendSleepFollowup({ via: q.get("via") || "manual" }));
     if (q.get("status")) {
       const meta = await store().get("meta/last-ingest", { type: "json" });
       const log = (await store().get("meta/morning-log", { type: "json" })) || {};
