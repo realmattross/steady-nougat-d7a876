@@ -143,6 +143,40 @@ export async function ingest(payload) {
       if (payload.gait[g] === undefined || payload.gait[g] === "" || isNaN(v)) continue;
       put(localDate(at), `${g}|${at}`, { t: g, v, u: String(payload.gait[`${g}_unit`] || ""), s: at, e: at });
     }
+    // Sleep samples read directly from Apple Health by the shortcut: parallel
+    // newline-separated lists of ISO start/end and a value label per sample.
+    const split = (x) => String(x ?? "").split(/\r?\n/).map((t) => t.trim()).filter(Boolean);
+    const starts = split(payload.gait.sleep_starts), ends = split(payload.gait.sleep_ends), vals = split(payload.gait.sleep_values);
+    const n = Math.min(starts.length, ends.length);
+    const asleepRe = /asleep|core|deep|rem/i, inBedRe = /in ?bed/i;
+    const stagesFor = (label) => /deep/i.test(label) ? "deep" : /rem/i.test(label) ? "rem" : /core/i.test(label) ? "core" : /awake/i.test(label) ? "awake" : /asleep/i.test(label) ? "asleep" : "inBed";
+    const segs = [];
+    for (let i = 0; i < n; i++) {
+      const s0 = new Date(starts[i]), e0 = new Date(ends[i]);
+      if (isNaN(s0) || isNaN(e0) || e0 <= s0) continue;
+      const label = vals[i] || "";
+      if (!asleepRe.test(label) && !inBedRe.test(label)) continue;
+      segs.push({ s: s0, e: e0, stage: stagesFor(label), inBed: inBedRe.test(label) && !asleepRe.test(label) });
+    }
+    // Group into sessions: gap of > 2h starts a new session. Prefer asleep-type
+    // segments; fall back to in-bed only when no asleep segments exist in a session.
+    segs.sort((a, b) => a.s - b.s);
+    const sessions = [];
+    for (const g of segs) {
+      const cur = sessions[sessions.length - 1];
+      if (cur && g.s - cur.e <= 2 * 3600 * 1000) { cur.segs.push(g); if (g.e > cur.e) cur.e = g.e; }
+      else sessions.push({ s: g.s, e: g.e, segs: [g] });
+    }
+    for (const sess of sessions) {
+      const asleep = sess.segs.filter((g) => !g.inBed);
+      const use = asleep.length ? asleep : sess.segs;
+      const stages = {};
+      let total = 0;
+      for (const g of use) { const m = Math.round((g.e - g.s) / 60000); total += m; stages[g.stage] = (stages[g.stage] || 0) + m; }
+      if (total < 10) continue;
+      const endIso = sess.e.toISOString();
+      put(localDate(endIso), `sleep|${endIso}`, { t: "sleepsession", total, stages, s: sess.s.toISOString(), e: endIso, src: "shortcut" });
+    }
     return finish(byDay, counts, payload);
   }
 

@@ -16,7 +16,14 @@ export default async (req) => {
 
   let payload;
   try {
-    payload = await req.json();
+    const text = await req.text();
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      // iOS Shortcuts inserts raw newlines when a list is interpolated into a
+      // string; escape control characters and retry.
+      payload = JSON.parse(text.replace(/[\r\n\t]/g, (c) => ({ "\r": "", "\n": "\\n", "\t": " " })[c]));
+    }
   } catch {
     return new Response(JSON.stringify({ error: "Invalid JSON" }), { status: 400, headers: { "Content-Type": "application/json" } });
   }
