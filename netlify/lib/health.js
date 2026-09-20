@@ -146,7 +146,32 @@ export async function ingest(payload) {
     // Sleep samples read directly from Apple Health by the shortcut: parallel
     // newline-separated lists of ISO start/end and a value label per sample.
     const split = (x) => String(x ?? "").split(/\r?\n/).map((t) => t.trim()).filter(Boolean);
-    const starts = split(payload.gait.sleep_starts), ends = split(payload.gait.sleep_ends), vals = split(payload.gait.sleep_values);
+    // Shortcuts' unformatted date text, e.g. "20 Sept 2026 at 06:45", "20 Sep 2026, 06:45",
+    // "20/09/2026, 06:45" or "Sep 20, 2026 at 6:45 AM" -> ISO in Europe/London.
+    const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11 };
+    const londonOffsetMin = (y, mo, d, h, mi) => {
+      const guess = Date.UTC(y, mo, d, h, mi);
+      const parts = new Intl.DateTimeFormat("en-GB", { timeZone: TZ, timeZoneName: "shortOffset" }).formatToParts(new Date(guess));
+      const tz = parts.find((p) => p.type === "timeZoneName")?.value || "GMT";
+      const m = tz.match(/GMT([+-]\d+)?/);
+      return m && m[1] ? Number(m[1]) * 60 : 0;
+    };
+    const parseLoose = (txt) => {
+      if (!txt) return null;
+      const iso = new Date(txt);
+      if (/\d{4}-\d{2}-\d{2}T/.test(txt) && !isNaN(iso)) return iso.toISOString();
+      let y, mo, d, h, mi;
+      let m = txt.match(/(\d{1,2})\s+([A-Za-z]{3,5})\.?\s+(\d{4}).*?(\d{1,2}):(\d{2})\s*([ap]m)?/i);
+      if (m) { d = +m[1]; mo = MONTHS[m[2].toLowerCase().slice(0, 4)] ?? MONTHS[m[2].toLowerCase().slice(0, 3)]; y = +m[3]; h = +m[4]; mi = +m[5]; if (m[6]) { if (/pm/i.test(m[6]) && h < 12) h += 12; if (/am/i.test(m[6]) && h === 12) h = 0; } }
+      else if ((m = txt.match(/([A-Za-z]{3,5})\.?\s+(\d{1,2}),?\s+(\d{4}).*?(\d{1,2}):(\d{2})\s*([ap]m)?/i))) { mo = MONTHS[m[1].toLowerCase().slice(0, 4)] ?? MONTHS[m[1].toLowerCase().slice(0, 3)]; d = +m[2]; y = +m[3]; h = +m[4]; mi = +m[5]; if (m[6]) { if (/pm/i.test(m[6]) && h < 12) h += 12; if (/am/i.test(m[6]) && h === 12) h = 0; } }
+      else if ((m = txt.match(/(\d{1,2})\/(\d{1,2})\/(\d{4}).*?(\d{1,2}):(\d{2})/))) { d = +m[1]; mo = +m[2] - 1; y = +m[3]; h = +m[4]; mi = +m[5]; }
+      else return null;
+      if (mo == null || isNaN(mo)) return null;
+      const off = londonOffsetMin(y, mo, d, h, mi);
+      return new Date(Date.UTC(y, mo, d, h, mi) - off * 60000).toISOString();
+    };
+    const pick = (fmt, raw) => { const a = split(fmt); return a.length ? a : split(raw).map(parseLoose).filter(Boolean); };
+    const starts = pick(payload.gait.sleep_starts, payload.gait.sleep_starts_raw), ends = pick(payload.gait.sleep_ends, payload.gait.sleep_ends_raw), vals = split(payload.gait.sleep_values);
     const n = Math.min(starts.length, ends.length);
     const asleepRe = /asleep|core|deep|rem/i, inBedRe = /in ?bed/i;
     const stagesFor = (label) => /deep/i.test(label) ? "deep" : /rem/i.test(label) ? "rem" : /core/i.test(label) ? "core" : /awake/i.test(label) ? "awake" : /asleep/i.test(label) ? "asleep" : "inBed";
