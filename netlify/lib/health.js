@@ -148,6 +148,11 @@ export async function ingest(payload) {
 
   // ---- Health Webhook format ----
   if (payload && !payload.data) {
+    // Range metrics (steps, distance, calories) arrive aggregated over the day's
+    // range, re-sent on every sync. Whether each delivery is a running total or a
+    // delta is still being confirmed (see dayStats), so keep every delivery,
+    // keyed on the payload timestamp, rather than overwriting.
+    const deliv = payload.timestamp || new Date().toISOString();
     for (const [field, [short, vf, mode]] of Object.entries(HW)) {
       const arr = payload[field];
       if (!Array.isArray(arr)) continue;
@@ -157,7 +162,8 @@ export async function ingest(payload) {
         if (!start) continue;
         let v = Number(s[vf]);
         if (short === "spo2" && v > 1) v = v / 100; // store as fraction like HealthKit
-        put(localDate(start), `${short}|${start}|${end}`, { t: short, v, s: start, e: end });
+        const key = mode === "range" ? `${short}|${start}|${end}|${deliv}` : `${short}|${start}|${end}`;
+        put(localDate(start), key, { t: short, v, s: start, e: end });
       }
     }
     for (const s of payload.blood_pressure || []) {
@@ -266,7 +272,17 @@ export async function dayStats(date) {
   if (!rec) return out;
 
   const samples = Object.values(rec.samples || {});
-  const sum = (t) => { const xs = samples.filter((s) => s.t === t); return xs.length ? xs.reduce((a, s) => a + (s.v || 0), 0) : null; };
+  // Range metrics: several deliveries may cover the same range (Health Webhook
+  // re-sends the day's aggregate on each sync). Treat them as running totals:
+  // take the max per range, then sum distinct ranges. (If they turn out to be
+  // deltas, switch max -> sum here.)
+  const sum = (t) => {
+    const xs = samples.filter((s) => s.t === t);
+    if (!xs.length) return null;
+    const byRange = {};
+    for (const s of xs) { const k = `${s.s}|${s.e}`; byRange[k] = Math.max(byRange[k] ?? -Infinity, s.v || 0); }
+    return Object.values(byRange).reduce((a, b) => a + b, 0);
+  };
   const avg = (t) => { const xs = samples.filter((s) => s.t === t); return xs.length ? xs.reduce((a, s) => a + (s.v || 0), 0) / xs.length : null; };
   const last = (t) => { const xs = samples.filter((s) => s.t === t).sort((a, b) => a.s.localeCompare(b.s)); return xs.length ? xs[xs.length - 1].v : null; };
 
@@ -290,20 +306,27 @@ export async function dayStats(date) {
   out.bp = bps.length ? { sys: Math.round(bps[bps.length - 1].sys), dia: Math.round(bps[bps.length - 1].dia), at: localTime(bps[bps.length - 1].s), n: bps.length } : null;
 
   // Sleep (Health Webhook sessions): pick the longest session ending this day.
-  const sessions = samples.filter((s) => s.t === "sleepsession").sort((a, b) => b.total - a.total);
+  const allSessions = samples.filter((s) => s.t === "sleepsession").sort((a, b) => a.e.localeCompare(b.e));
+  const endHour = (iso) => Number(new Intl.DateTimeFormat("en-GB", { timeZone: TZ, hour: "2-digit", hour12: false }).format(new Date(iso)));
+  const night = allSessions.filter((s) => endHour(s.e) < 14);   // ended before 2pm = last night's sleep
+  const naps = allSessions.filter((s) => endHour(s.e) >= 14);
   const sl = samples.filter((s) => s.t === "sleep");
-  if (sessions.length) {
-    const main = sessions[0];
-    const st = main.stages || {};
+  if (night.length) {
+    const st = {};
+    for (const s of night) for (const [k, v] of Object.entries(s.stages || {})) st[k] = (st[k] || 0) + v;
     const staged = Object.keys(st).some((k) => ["deep", "rem", "core"].includes(k));
     out.sleep = {
-      total_min: main.total,
+      total_min: night.reduce((a, s) => a + (s.total || 0), 0),
       deep_min: st.deep || 0, rem_min: st.rem || 0, core_min: st.core || 0, awake_min: st.awake || 0,
-      bed: main.s ? localTime(main.s) : null,
-      wake: main.e ? localTime(main.e) : null,
+      bed: localTime(night[0].s),
+      wake: localTime(night[night.length - 1].e),
       staged,
-      sessions: sessions.length,
+      sessions: night.length,
+      nap_min: naps.reduce((a, s) => a + (s.total || 0), 0) || null,
     };
+  } else if (naps.length) {
+    out.sleep = null;
+    out.nap_min = naps.reduce((a, s) => a + (s.total || 0), 0);
   } else if (sl.length) {
     // Raw HealthKit samples: prefer staged (core/deep/rem/awake); fall back to inBed/asleep.
     const mins = (s) => (new Date(s.e) - new Date(s.s)) / 60000;
@@ -344,6 +367,8 @@ export async function baseline(date, days = 7) {
     hrv: mean(pick((s) => s.hrv)),
     sleep_min: mean(pick((s) => s.sleep?.total_min)),
     active_kcal: mean(pick((s) => s.active_kcal)),
+    walking_speed_kmh: mean(pick((s) => { const g = s.gait?.walking_speed; return !g ? null : /mi/i.test(g.unit) ? g.value * 1.609344 : /m\/s/i.test(g.unit) ? g.value * 3.6 : g.value; })),
+    double_support: mean(pick((s) => s.gait?.walking_double_support?.value)),
     n: stats.filter((s) => s.steps != null || s.sleep).length,
   };
 }
@@ -400,7 +425,23 @@ export async function morningMessage(today = todayLocal()) {
     vitals.push(`BP ${bp.sys}/${bp.dia}`);
     if (bp.sys > 140 || bp.dia > 90) flags.push(`BP high (${bp.sys}/${bp.dia})`);
   }
+  if (t.hr ?? y.hr) { const h = t.hr ?? y.hr; vitals.push(`HR ${h.min}–${h.max} (avg ${h.avg})`); }
   if (vitals.length) lines.push(vitals.join(" · "));
+
+  // Gait (iPhone motion chip via the Gait to Jeeves shortcut): yesterday's, with 7-day baseline
+  const gy = y.gait || {};
+  if (Object.keys(gy).length) {
+    const toKmh = (g) => !g ? null : /mi/i.test(g.unit) ? g.value * 1.609344 : /m\/s/i.test(g.unit) ? g.value * 3.6 : g.value;
+    const toCm = (g) => !g ? null : /in/i.test(g.unit) ? g.value * 2.54 : /^m$/i.test(g.unit) ? g.value * 100 : g.value;
+    const parts = [];
+    if (gy.walking_speed) parts.push(`speed ${toKmh(gy.walking_speed).toFixed(1)} km/h${arrow(pct(toKmh(gy.walking_speed), by.walking_speed_kmh))}`);
+    if (gy.walking_step_length) parts.push(`step ${Math.round(toCm(gy.walking_step_length))} cm`);
+    if (gy.walking_double_support) parts.push(`double support ${gy.walking_double_support.value}%${arrow(pct(gy.walking_double_support.value, by.double_support))}`);
+    if (gy.walking_asymmetry) parts.push(`asymmetry ${gy.walking_asymmetry.value}%`);
+    if (parts.length) lines.push(`Gait: ${parts.join(" · ")}`);
+    if (by.double_support != null && gy.walking_double_support && gy.walking_double_support.value - by.double_support >= 3) flags.push(`double support up ${(gy.walking_double_support.value - by.double_support).toFixed(1)} pts on your week`);
+  }
+  if (t.sleep?.nap_min || y.nap_min) lines.push(`Naps yesterday: ${hm(y.nap_min || 0)}`);
 
   // Yesterday's activity
   const act = [];
@@ -422,6 +463,32 @@ export async function morningMessage(today = todayLocal()) {
   lines.push(flags.length ? `⚠ ${flags.join("; ")}` : "All within your usual range.");
 
   return { text: lines.join("\n"), flags, today: t, yesterday: y, baseline: b };
+}
+
+/**
+ * Send the morning summary at most once per London day, whoever triggers it
+ * (the Netlify schedule, the Mac's hourly job, or a manual call). Records
+ * every attempt under meta/morning-log so status shows what happened.
+ */
+export async function sendMorningOnce({ force = false, via = "unknown" } = {}) {
+  const st = store();
+  const today = todayLocal();
+  const log = (await st.get("meta/morning-log", { type: "json" })) || {};
+  if (log[today]?.sent && !force) return { sent: false, already: true, date: today, at: log[today].at, via: log[today].via };
+  const m = await morningMessage(today);
+  const meta = await st.get("meta/last-ingest", { type: "json" });
+  const hasData = m.today.sleep || m.yesterday.steps != null || m.yesterday.rhr != null || m.today.bp || m.yesterday.bp;
+  let text = m.text;
+  if (!hasData) {
+    const last = meta?.at ? `last sync ${meta.at.replace("T", " ").slice(0, 16)} UTC` : "no sync received yet";
+    text = `Health: no data for today or yesterday (${last}). Check Health Webhook on your phone.`;
+  }
+  await sendTelegram(text);
+  log[today] = { sent: true, at: new Date().toISOString(), via, hasData: !!hasData };
+  // keep the log small
+  for (const k of Object.keys(log).sort().slice(0, -30)) delete log[k];
+  await st.setJSON("meta/morning-log", log);
+  return { sent: true, already: false, date: today, via, text };
 }
 
 export async function sendTelegram(text) {

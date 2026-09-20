@@ -2,7 +2,7 @@
  * GET /health/report?date=YYYY-MM-DD   -> that day's aggregated stats (default today)
  * GET /health/report?days=7            -> last N days of stats
  * GET /health/report?morning=1         -> the morning summary text + data (no send)
- * GET /health/report?morning=1&send=1  -> generate AND send to Telegram
+ * GET /health/report?morning=1&send=1  -> send to Telegram if not already sent today (&force=1 to resend)
  * GET /health/report?status=1          -> last-ingest metadata
  * GET /health/report?wipe=YYYY-MM-DD   -> delete that day's stored samples (test cleanup)
  * GET /health/report?raw=1&days=N      -> stored samples for the last N days (for the Mac mirror)
@@ -10,7 +10,7 @@
  * Auth: Bearer $HEALTH_INGEST_TOKEN (or ?token=)
  * Used by Jeeves (Mac) to answer "how did I sleep?" and for manual testing.
  */
-import { authed, dayStats, todayLocal, shiftDate, morningMessage, sendTelegram, store } from "../lib/health.js";
+import { authed, dayStats, todayLocal, shiftDate, morningMessage, sendMorningOnce, store } from "../lib/health.js";
 
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj, null, 2), { status, headers: { "Content-Type": "application/json" } });
@@ -28,12 +28,16 @@ export default async (req) => {
     }
     if (q.get("status")) {
       const meta = await store().get("meta/last-ingest", { type: "json" });
-      return json({ lastIngest: meta || null, today: todayLocal() });
+      const log = (await store().get("meta/morning-log", { type: "json" })) || {};
+      return json({ lastIngest: meta || null, today: todayLocal(), morningLog: Object.fromEntries(Object.entries(log).sort().slice(-7)) });
     }
     if (q.get("morning")) {
+      if (q.get("send")) {
+        const r = await sendMorningOnce({ force: !!q.get("force"), via: q.get("via") || "manual" });
+        return json(r);
+      }
       const m = await morningMessage(q.get("date") || todayLocal());
-      if (q.get("send")) await sendTelegram(m.text);
-      return json({ sent: !!q.get("send"), ...m });
+      return json({ sent: false, ...m });
     }
     const days = Number(q.get("days") || 0);
     if (q.get("raw")) {
